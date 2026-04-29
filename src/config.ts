@@ -1,5 +1,7 @@
 import path from 'node:path';
 import os from 'node:os';
+import { readFileSync } from 'node:fs';
+import { DEFAULT_PROVIDER_PRIORITY, ProviderType, isProviderType } from './state/settings.js';
 
 export interface BridgeConfig {
     token: string;
@@ -11,10 +13,14 @@ export interface BridgeConfig {
     defaultSandbox: string;
     defaultModel: string | null;
     defaultProvider: string;
+    defaultProviderPriority: ProviderType[];
     defaultPermissionMode: string;
     defaultReminderPings: boolean;
     codexBin: string;
     opencodeBin: string;
+    anthropicBin: string;
+    zaiBin: string;
+    qwenBin: string;
     providerCommand: string | null;
     runTimeoutMs: number;
     autoSwitchOnLimit: boolean;
@@ -51,10 +57,38 @@ function readList(...names: string[]): string[] {
     return Array.from(new Set(values));
 }
 
+function readSettingsAllowedUsers(): string[] {
+    try {
+        const parsed = JSON.parse(readFileSync(path.resolve('data', 'settings.json'), 'utf8'));
+        const values = Array.isArray(parsed?.settings?.allowedUserIds) ? parsed.settings.allowedUserIds : [];
+
+        return values
+            .map((value: unknown) => typeof value === 'string' ? value.trim() : '')
+            .filter(Boolean);
+    } catch {
+        return [];
+    }
+}
+
+function readProviderPriority(): ProviderType[] {
+    const configured = readList('DISCODE_PROVIDER_PRIORITY', 'PROVIDER_PRIORITY')
+        .map(value => value.toLowerCase())
+        .filter(isProviderType);
+    const values = configured.length > 0 ? configured : DEFAULT_PROVIDER_PRIORITY;
+    const seen = new Set<ProviderType>();
+
+    return values.filter(provider => {
+        if (seen.has(provider)) return false;
+        seen.add(provider);
+
+        return true;
+    });
+}
+
 export function loadConfig(): BridgeConfig {
     const token = process.env.DISCORD_TOKEN?.trim() || '';
     const clientId = process.env.DISCORD_CLIENT_ID?.trim() || '';
-    const allowedUserIds = readList('ALLOWED_USER_IDS', 'ALLOWED_USER_ID');
+    const allowedUserIds = Array.from(new Set([...readList('ALLOWED_USER_IDS', 'ALLOWED_USER_ID'), ...readSettingsAllowedUsers()]));
     const primaryAllowedUserId = process.env.PRIMARY_ALLOWED_USER_ID?.trim() || allowedUserIds[0] || '';
 
     return {
@@ -67,10 +101,14 @@ export function loadConfig(): BridgeConfig {
         defaultSandbox: process.env.DEFAULT_SANDBOX?.trim() || 'workspace-write',
         defaultModel: process.env.DEFAULT_MODEL?.trim() || null,
         defaultProvider: process.env.DISCODE_PROVIDER?.trim() || process.env.DEFAULT_PROVIDER?.trim() || 'codex',
+        defaultProviderPriority: readProviderPriority(),
         defaultPermissionMode: process.env.DISCODE_PERMISSION_MODE?.trim() || process.env.DEFAULT_PERMISSION_MODE?.trim() || 'full',
         defaultReminderPings: readBoolean('DISCODE_REMINDER_PINGS', true),
         codexBin: process.env.CODEX_BIN?.trim() || 'codex',
         opencodeBin: process.env.OPENCODE_BIN?.trim() || 'opencode',
+        anthropicBin: process.env.ANTHROPIC_BIN?.trim() || process.env.CLAUDE_BIN?.trim() || 'claude',
+        zaiBin: process.env.ZAI_BIN?.trim() || 'zai',
+        qwenBin: process.env.QWEN_BIN?.trim() || 'qwen',
         providerCommand: process.env.DISCODE_PROVIDER_COMMAND?.trim() || null,
         runTimeoutMs: readNumber('CODEX_TIMEOUT_MS', 30 * 60 * 1000),
         autoSwitchOnLimit: readBoolean('AUTO_SWITCH_ON_LIMIT', true),

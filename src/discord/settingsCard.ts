@@ -3,10 +3,13 @@ import { BridgeConfig } from '../config.js';
 import {
     BridgeSettings,
     getEffectiveModel,
+    getEffectiveNotifyPermissionRequired,
+    getEffectiveNotifyPromptFinished,
+    getEffectiveNotifyUsageLimit,
     getEffectivePermissionMode,
     getEffectiveProvider,
+    getEffectiveProviderPriority,
     getEffectiveReasoning,
-    getEffectiveReminderPings,
     getEffectiveSlashResponsesEphemeral
 } from '../state/settings.js';
 
@@ -23,28 +26,35 @@ function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: Setting
     const provider = getEffectiveProvider(settings, config.defaultProvider);
     const model = getEffectiveModel(settings, config.defaultModel);
     const reasoning = getEffectiveReasoning(settings);
+    const providerPriority = getEffectiveProviderPriority(settings, config.defaultProviderPriority);
     const permissionMode = getEffectivePermissionMode(settings, config.defaultPermissionMode);
-    const reminderPings = getEffectiveReminderPings(settings, config.defaultReminderPings);
+    const notifyPromptFinished = getEffectiveNotifyPromptFinished(settings, config.defaultReminderPings);
+    const notifyPermissionRequired = getEffectiveNotifyPermissionRequired(settings);
+    const notifyUsageLimit = getEffectiveNotifyUsageLimit(settings);
     const slashResponsesEphemeral = getEffectiveSlashResponsesEphemeral(settings);
+    const allowedUsers = mergeAllowedUsers(config.allowedUserIds, settings.allowedUserIds || []);
     const rows = page === 'runtime'
         ? [
             row('Provider', label(provider), 166),
             row('Model', model, 246),
             row('Reasoning', label(reasoning), 326),
-            row('Wrapper', provider === 'custom' ? commandState(config.providerCommand) : provider === 'opencode' ? config.opencodeBin : config.codexBin, 406)
+            row('Priority', providerPriority.map(label).join(' > '), 406),
+            row('Wrapper', wrapperLabel(provider, config), 486)
         ]
         : page === 'access'
             ? [
                 row('Permission', permissionLabel(permissionMode), 166),
-                row('Workspace', config.defaultWorkspace, 246),
-                row('Sandbox', permissionMode === 'auto-review' ? 'Read only' : permissionMode === 'directory' ? 'Directory scoped' : 'Full access', 326),
-                row('Roblox extension', config.extensionRobloxApiKey ? 'Configured' : 'Not configured', 406)
+                row('Allowed users', `${allowedUsers.length} configured`, 246),
+                row('Primary notify', settings.primaryAllowedUserId || config.primaryAllowedUserId || allowedUsers[0] || 'Not set', 326),
+                row('Sandbox', permissionMode === 'auto-review' ? 'Read only' : permissionMode === 'directory' ? 'Directory scoped' : 'Full access', 406),
+                row('Workspace', config.defaultWorkspace, 486)
             ]
             : [
-                row('Done ping', reminderPings ? 'On' : 'Off', 166),
-                row('Slash responses', slashResponsesEphemeral ? 'Ephemeral' : 'Public', 246),
-                row('Usage switching', config.autoSwitchOnLimit ? 'On' : 'Off', 326),
-                row('Scope', 'Servers, DMs, and group chats', 406)
+                row('Prompt finished', notifyPromptFinished ? 'Notify prompter' : 'Off', 166),
+                row('Permission needed', notifyPermissionRequired ? 'Notify prompter' : 'Off', 246),
+                row('Usage limits', notifyUsageLimit ? 'Notify prompter' : 'Off', 326),
+                row('Slash responses', slashResponsesEphemeral ? 'Ephemeral' : 'Public', 406),
+                row('Usage switching', config.autoSwitchOnLimit ? 'On' : 'Off', 486)
             ];
 
     return [
@@ -90,6 +100,20 @@ function permissionLabel(value: string): string {
 
 function commandState(value: string | null): string {
     return value ? value : 'Set DISCODE_PROVIDER_COMMAND';
+}
+
+function wrapperLabel(provider: string, config: BridgeConfig): string {
+    if (provider === 'custom') return commandState(config.providerCommand);
+    if (provider === 'opencode') return config.opencodeBin;
+    if (provider === 'anthropic') return config.anthropicBin;
+    if (provider === 'zai') return config.zaiBin;
+    if (provider === 'qwen') return config.qwenBin;
+
+    return config.codexBin;
+}
+
+function mergeAllowedUsers(envUsers: string[], settingsUsers: string[]): string[] {
+    return Array.from(new Set([...envUsers, ...settingsUsers].map(value => value.trim()).filter(Boolean)));
 }
 
 function label(value: string): string {

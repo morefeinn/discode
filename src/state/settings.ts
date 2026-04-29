@@ -4,15 +4,21 @@ import os from 'node:os';
 import path from 'node:path';
 
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
-export type ProviderType = 'codex' | 'opencode' | 'custom';
+export type ProviderType = 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'custom';
 export type PermissionMode = 'full' | 'directory' | 'auto-review';
 
 export interface BridgeSettings {
     model?: string | null;
     reasoningEffort?: ReasoningEffort;
     provider?: ProviderType;
+    providerPriority?: ProviderType[];
     permissionMode?: PermissionMode;
+    allowedUserIds?: string[];
+    primaryAllowedUserId?: string | null;
     reminderPings?: boolean;
+    notifyPromptFinished?: boolean;
+    notifyPermissionRequired?: boolean;
+    notifyUsageLimit?: boolean;
     slashResponsesEphemeral?: boolean;
 }
 
@@ -27,6 +33,7 @@ interface SettingsFile {
 
 const dataPath = path.resolve('data', 'settings.json');
 export const DEFAULT_MODEL_CHOICE = '__default__';
+export const DEFAULT_PROVIDER_PRIORITY: ProviderType[] = ['codex', 'opencode', 'anthropic', 'zai', 'qwen', 'custom'];
 
 async function readStore(): Promise<SettingsFile> {
     try {
@@ -94,6 +101,19 @@ export function getEffectiveProvider(settings: BridgeSettings, defaultProvider: 
     return isProviderType(settings.provider) ? settings.provider : isProviderType(defaultProvider) ? defaultProvider : 'codex';
 }
 
+export function getEffectiveProviderPriority(settings: BridgeSettings, defaultPriority: ProviderType[] = DEFAULT_PROVIDER_PRIORITY): ProviderType[] {
+    const values = [...(settings.providerPriority || []), ...defaultPriority, ...DEFAULT_PROVIDER_PRIORITY]
+        .filter(isProviderType);
+    const seen = new Set<ProviderType>();
+
+    return values.filter(provider => {
+        if (seen.has(provider)) return false;
+        seen.add(provider);
+
+        return true;
+    });
+}
+
 export function getEffectivePermissionMode(settings: BridgeSettings, defaultPermissionMode: string): PermissionMode {
     return isPermissionMode(settings.permissionMode)
         ? settings.permissionMode
@@ -106,6 +126,18 @@ export function getEffectiveReminderPings(settings: BridgeSettings, defaultRemin
     return settings.reminderPings ?? defaultReminderPings;
 }
 
+export function getEffectiveNotifyPromptFinished(settings: BridgeSettings, defaultReminderPings: boolean): boolean {
+    return settings.notifyPromptFinished ?? settings.reminderPings ?? defaultReminderPings;
+}
+
+export function getEffectiveNotifyPermissionRequired(settings: BridgeSettings): boolean {
+    return settings.notifyPermissionRequired ?? true;
+}
+
+export function getEffectiveNotifyUsageLimit(settings: BridgeSettings): boolean {
+    return settings.notifyUsageLimit ?? true;
+}
+
 export function getEffectiveSlashResponsesEphemeral(settings: BridgeSettings): boolean {
     return settings.slashResponsesEphemeral ?? true;
 }
@@ -115,7 +147,12 @@ export function isReasoningEffort(value: unknown): value is ReasoningEffort {
 }
 
 export function isProviderType(value: unknown): value is ProviderType {
-    return value === 'codex' || value === 'opencode' || value === 'custom';
+    return value === 'codex'
+        || value === 'opencode'
+        || value === 'anthropic'
+        || value === 'zai'
+        || value === 'qwen'
+        || value === 'custom';
 }
 
 export function isPermissionMode(value: unknown): value is PermissionMode {

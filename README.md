@@ -27,7 +27,7 @@ The Discode installer writes a local `.env`. Required values are:
 - `DISCORD_CLIENT_ID`
 - `ALLOWED_USER_IDS`
 
-`ALLOWED_USER_IDS` is comma-separated. `PRIMARY_ALLOWED_USER_ID` controls approval and completion pings and defaults to the first allowed user.
+`ALLOWED_USER_IDS` is comma-separated. `PRIMARY_ALLOWED_USER_ID` defaults to the first allowed user. You can later adjust allowed users and notification behavior from `/codex settings`.
 
 ## Headless Install
 
@@ -42,7 +42,7 @@ Useful optional flags:
 - `--technical`: use the technical setup path
 - `--install-deps`: install missing checked dependencies in headless mode
 - `--workspace <path>`
-- `--provider codex|opencode|custom`
+- `--provider codex|opencode|anthropic|zai|qwen|custom`
 - `--provider-command <command>`
 - `--permission full|directory|auto-review`
 - `--models <comma-separated-models>`
@@ -133,7 +133,9 @@ On first run, Discode can import existing Codex sessions from `~/.codex-switcher
 }
 ```
 
-Supported providers are `codex`, `opencode`, and `custom`. Account `env` values and API keys are passed only to child agent processes.
+Supported providers are `codex`, `opencode`, `anthropic`, `zai`, `qwen`, and `custom`. Account `priority` controls account ordering, and `DISCODE_PROVIDER_PRIORITY` controls fallback provider order. Account `env` values and API keys are passed only to child agent processes.
+
+Usage checks support Codex session usage automatically. Other providers can expose credits or limits by adding `credits_balance`, `remaining_percent`, or a `usage_command` to the account. `usage_command` should print JSON with fields such as `primaryWindow`, `secondaryWindow`, or `creditsBalance`.
 
 Rust backends are supported as custom provider binaries through `DISCODE_PROVIDER=custom` and `DISCODE_PROVIDER_COMMAND`.
 

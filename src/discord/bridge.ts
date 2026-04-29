@@ -46,11 +46,14 @@ import {
 import { addMcpServer, listMcpServers } from '../state/mcps.js';
 import {
     getBridgeSettings,
+    getEffectiveNotifyPermissionRequired,
+    getEffectiveNotifyPromptFinished,
+    getEffectiveNotifyUsageLimit,
     getEffectiveModel,
     getEffectivePermissionMode,
     getEffectiveProvider,
+    getEffectiveProviderPriority,
     getEffectiveReasoning,
-    getEffectiveReminderPings,
     getEffectiveSlashResponsesEphemeral,
     isPermissionMode,
     isProviderType,
@@ -93,10 +96,15 @@ type PromptOptions = {
     codexThreadId?: string | null;
     runId?: string;
     recovering?: boolean;
+    requesterId?: string;
 };
+type LimitRetry =
+    | { kind: 'prompt'; conversationKey: string; prompt: string; options: PromptOptions; requesterId?: string }
+    | { kind: 'review'; options: CodexReviewOptions; requesterId?: string };
 type PendingSteer = { conversationKey: string; prompt: string; options: PromptOptions };
 type QueuedSteer = PendingSteer & { noticeChannelId: string };
 type PendingAccess = { target: ResponseTarget; conversationKey: string; prompt: string; options: PromptOptions };
+type PendingLimit = { retry: LimitRetry; expiresAt: number };
 type DashboardView = { components: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[]; files: AttachmentBuilder[] };
 
 const execFileAsync = promisify(execFile);
@@ -105,6 +113,8 @@ const usageDashboardSessions = new Map<string, UsageDashboardSession>();
 const pendingSteers = new Map<string, PendingSteer>();
 const queuedSteers = new Map<string, QueuedSteer[]>();
 const pendingAccessRequests = new Map<string, PendingAccess>();
+const pendingLimitRetries = new Map<string, PendingLimit>();
+const componentMessageActivity = new Map<string, number>();
 const ATTACHMENT_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.txt', '.log', '.json', '.md']);
 const MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
 const MODEL_BUTTON_ID = 'codex:model-panel';
@@ -112,9 +122,14 @@ const REASONING_BUTTON_ID = 'codex:reasoning-panel';
 const MODEL_SELECT_ID = 'codex:set-model';
 const REASONING_SELECT_ID = 'codex:set-reasoning';
 const PROVIDER_SELECT_ID = 'codex:set-provider';
+const PROVIDER_PRIORITY_SELECT_ID = 'codex:set-provider-priority';
 const PERMISSION_SELECT_ID = 'codex:set-permission';
-const REMINDER_SELECT_ID = 'codex:set-reminder';
+const NOTIFY_DONE_SELECT_ID = 'codex:set-notify-done';
+const NOTIFY_PERMISSION_SELECT_ID = 'codex:set-notify-permission';
+const NOTIFY_LIMIT_SELECT_ID = 'codex:set-notify-limit';
 const SLASH_PRIVACY_SELECT_ID = 'codex:set-slash-privacy';
+const ACCESS_USERS_BUTTON_ID = 'codex:settings-access-users';
+const ACCESS_USERS_MODAL_ID = 'codex:settings-access-users-modal';
 const SETTINGS_PAGE_SELECT_ID = 'codex:settings-page';
 const SETTINGS_BUTTON_ID = 'codex:settings-panel';
 const ACCESS_APPROVE_ID = 'codex:approve-access';
@@ -122,9 +137,11 @@ const CONVERSATION_SELECT_ID = 'codex:load-conversation';
 const CHAT_LINK_SELECT_ID = 'codex:chat-link';
 const ACCOUNT_SELECT_ID = 'codex:switch-account';
 const LIMIT_ACCOUNT_SELECT_ID = 'codex:limit-switch-account';
+const LIMIT_PROVIDER_SELECT_ID = 'codex:limit-switch-provider';
 const STEER_BUTTON_ID = 'codex:steer';
 const USAGE_PREV_ID = 'codex:usage-prev';
 const USAGE_NEXT_ID = 'codex:usage-next';
+const USAGE_ACTIVATE_ACCOUNT_ID = 'codex:usage-activate-account';
 const WORKSPACE_SELECT_ID = 'codex:set-workspace';
 const WORKSPACE_ADD_BUTTON_ID = 'codex:add-workspace';
 const WORKSPACE_ADD_MODAL_ID = 'codex:add-workspace-modal';
@@ -132,7 +149,8 @@ const TERMINAL_RUN_BUTTON_ID = 'codex:terminal-run';
 const TERMINAL_RUN_MODAL_ID = 'codex:terminal-run-modal';
 const MCP_ADD_BUTTON_ID = 'codex:add-mcp';
 const MCP_ADD_MODAL_ID = 'codex:add-mcp-modal';
-const USAGE_DASHBOARD_TTL_MS = 10 * 60 * 1000;
+const COMPONENT_IDLE_TTL_MS = 60 * 1000;
+const USAGE_DASHBOARD_TTL_MS = COMPONENT_IDLE_TTL_MS;
 const GREEK_ACCOUNT_NAMES = [
     'Apollo',
     'Athena',
@@ -170,6 +188,9 @@ const reasoningChoices: { label: string; value: ReasoningEffort; description: st
 const providerChoices: { label: string; value: ProviderType; description: string }[] = [
     { label: 'Codex', value: 'codex', description: 'Use the local Codex CLI.' },
     { label: 'OpenCode', value: 'opencode', description: 'Use an opencode CLI wrapper.' },
+    { label: 'Anthropic', value: 'anthropic', description: 'Use an Anthropic-compatible CLI.' },
+    { label: 'Z.ai', value: 'zai', description: 'Use a Z.ai-compatible CLI.' },
+    { label: 'Qwen', value: 'qwen', description: 'Use a Qwen-compatible CLI.' },
     { label: 'Custom', value: 'custom', description: 'Use DISCODE_PROVIDER_COMMAND.' }
 ];
 const permissionChoices: { label: string; value: PermissionMode; description: string }[] = [
@@ -196,7 +217,7 @@ export class DiscordCodexBridge {
 
     async handleAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
         if (interaction.commandName !== this.commandName) return;
-        if (!this.isAuthorized(interaction.user.id)) {
+        if (!(await this.isAuthorized(interaction.user.id))) {
             await interaction.respond([]);
             return;
         }
@@ -234,7 +255,7 @@ export class DiscordCodexBridge {
     }
 
     async handleInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
-        if (!this.isAuthorized(interaction.user.id)) {
+        if (!(await this.isAuthorized(interaction.user.id))) {
             await interaction.reply({ content: 'Access denied.', flags: MessageFlags.Ephemeral });
             return;
         }
@@ -315,7 +336,8 @@ export class DiscordCodexBridge {
                     reasoningEffort,
                     dangerous: interaction.options.getBoolean('dangerous') === true || this.isPublishRequest(prompt),
                     chatName,
-                    discordThreadId: thread.id
+                    discordThreadId: thread.id,
+                    requesterId: interaction.user.id
                 });
                 return;
             }
@@ -331,7 +353,8 @@ export class DiscordCodexBridge {
                 permissionMode,
                 reasoningEffort,
                 dangerous: interaction.options.getBoolean('dangerous') === true || this.isPublishRequest(prompt),
-                chatName
+                chatName,
+                requesterId: interaction.user.id
             });
             return;
         }
@@ -353,7 +376,8 @@ export class DiscordCodexBridge {
                 model: selectedModel,
                 permissionMode: permissionMode === 'auto-review' ? 'auto-review' : undefined,
                 reasoningEffort: getEffectiveReasoning(settings),
-                dangerous: interaction.options.getBoolean('dangerous') === true
+                dangerous: interaction.options.getBoolean('dangerous') === true,
+                requesterId: interaction.user.id
             });
             return;
         }
@@ -386,7 +410,8 @@ export class DiscordCodexBridge {
                     reasoningEffort,
                     dangerous: interaction.options.getBoolean('dangerous') === true,
                     chatName,
-                    discordThreadId: thread.id
+                    discordThreadId: thread.id,
+                    requesterId: interaction.user.id
                 });
                 return;
             }
@@ -400,7 +425,8 @@ export class DiscordCodexBridge {
                 permissionMode,
                 reasoningEffort,
                 dangerous: interaction.options.getBoolean('dangerous') === true,
-                chatName
+                chatName,
+                requesterId: interaction.user.id
             });
             return;
         }
@@ -428,10 +454,12 @@ export class DiscordCodexBridge {
     }
 
     async handleComponent(interaction: ComponentInteraction): Promise<void> {
-        if (!this.isAuthorized(interaction.user.id)) {
+        if (!(await this.isAuthorized(interaction.user.id))) {
             await interaction.reply({ content: 'Access denied.', flags: MessageFlags.Ephemeral });
             return;
         }
+
+        if (await this.expireInactiveComponent(interaction)) return;
 
         if (interaction.isButton() && (interaction.customId === MODEL_BUTTON_ID || interaction.customId === REASONING_BUTTON_ID)) {
             await this.showSettingsDashboard(interaction, 'runtime');
@@ -440,6 +468,11 @@ export class DiscordCodexBridge {
 
         if (interaction.isButton() && interaction.customId === SETTINGS_BUTTON_ID) {
             await this.showSettingsDashboard(interaction, 'runtime');
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId === ACCESS_USERS_BUTTON_ID) {
+            await interaction.showModal(await this.createAccessUsersModal());
             return;
         }
 
@@ -508,6 +541,14 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.isStringSelectMenu() && interaction.customId === PROVIDER_PRIORITY_SELECT_ID) {
+            const values = interaction.values.filter(isProviderType);
+
+            await updateBridgeSettings({ providerPriority: values });
+            await this.updateSettingsDashboard(interaction, 'runtime');
+            return;
+        }
+
         if (interaction.isStringSelectMenu() && interaction.customId === PERMISSION_SELECT_ID) {
             const selected = interaction.values[0];
 
@@ -518,8 +559,23 @@ export class DiscordCodexBridge {
             return;
         }
 
-        if (interaction.isStringSelectMenu() && interaction.customId === REMINDER_SELECT_ID) {
-            await updateBridgeSettings({ reminderPings: interaction.values[0] === 'on' });
+        if (interaction.isStringSelectMenu() && interaction.customId === NOTIFY_DONE_SELECT_ID) {
+            await updateBridgeSettings({
+                notifyPromptFinished: interaction.values[0] === 'on',
+                reminderPings: interaction.values[0] === 'on'
+            });
+            await this.updateSettingsDashboard(interaction, 'notifications');
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId === NOTIFY_PERMISSION_SELECT_ID) {
+            await updateBridgeSettings({ notifyPermissionRequired: interaction.values[0] === 'on' });
+            await this.updateSettingsDashboard(interaction, 'notifications');
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId === NOTIFY_LIMIT_SELECT_ID) {
+            await updateBridgeSettings({ notifyUsageLimit: interaction.values[0] === 'on' });
             await this.updateSettingsDashboard(interaction, 'notifications');
             return;
         }
@@ -607,7 +663,6 @@ export class DiscordCodexBridge {
             await interaction.deferUpdate();
             const sessionId = interaction.customId.split(':').at(-1) || '';
             const page = Math.max(0, Number(interaction.values[0]) - 1);
-            await this.accounts.switchTo(interaction.values[0]);
             const dashboard = this.createUsageDashboardView(sessionId, page) || await this.createUsageDashboard(page);
 
             await interaction.editReply({
@@ -620,16 +675,52 @@ export class DiscordCodexBridge {
             return;
         }
 
-        if (interaction.isStringSelectMenu() && interaction.customId === LIMIT_ACCOUNT_SELECT_ID) {
+        if (interaction.isButton() && interaction.customId.startsWith(USAGE_ACTIVATE_ACCOUNT_ID)) {
             await interaction.deferUpdate();
+            const page = Math.max(1, Number(interaction.customId.split(':').at(-1)) || 1);
+            const account = await this.accounts.switchTo(String(page));
+            const dashboard = await this.createUsageDashboard(page - 1);
+
+            await interaction.editReply({
+                content: `Using ${account.name}.`,
+                embeds: [],
+                attachments: [],
+                components: dashboard.components,
+                files: dashboard.files
+            });
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId.startsWith(LIMIT_ACCOUNT_SELECT_ID)) {
+            await interaction.deferUpdate();
+            const retryId = interaction.customId.split(':').at(-1) || '';
             const account = await this.accounts.switchTo(interaction.values[0]);
             const accounts = await this.accounts.listAccounts();
             const summary = accounts.find(item => item.id === account.id);
 
             await interaction.editReply({
-                content: `Switched to ${summary ? this.getAccountAlias(summary) : 'selected account'}.`,
+                content: `Switched to ${summary ? this.getAccountAlias(summary) : 'selected account'} and retrying.`,
                 components: []
             });
+            await this.runPendingLimitRetry(interaction, retryId, { provider: summary?.provider });
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId.startsWith(LIMIT_PROVIDER_SELECT_ID)) {
+            await interaction.deferUpdate();
+            const retryId = interaction.customId.split(':').at(-1) || '';
+            const provider = interaction.values[0];
+
+            if (!isProviderType(provider)) {
+                await interaction.editReply({ content: 'That provider is no longer available.', components: [] });
+                return;
+            }
+            await updateBridgeSettings({ provider });
+            await interaction.editReply({
+                content: `Switched to ${this.capitalize(provider)} and retrying.`,
+                components: []
+            });
+            await this.runPendingLimitRetry(interaction, retryId, { provider });
             return;
         }
 
@@ -651,7 +742,7 @@ export class DiscordCodexBridge {
     }
 
     async handleModal(interaction: ModalSubmitInteraction): Promise<void> {
-        if (!this.isAuthorized(interaction.user.id)) {
+        if (!(await this.isAuthorized(interaction.user.id))) {
             await interaction.reply({ content: 'Access denied.', flags: MessageFlags.Ephemeral });
             return;
         }
@@ -684,6 +775,15 @@ export class DiscordCodexBridge {
 
             await addMcpServer(name, command, args);
             await this.showMcpDashboard(interaction);
+            return;
+        }
+
+        if (interaction.customId === ACCESS_USERS_MODAL_ID) {
+            const allowedUserIds = this.parseUserIds(interaction.fields.getTextInputValue('allowedUsers'));
+            const primaryAllowedUserId = this.parseUserIds(interaction.fields.getTextInputValue('primaryUser'))[0] || allowedUserIds[0] || null;
+
+            await updateBridgeSettings({ allowedUserIds, primaryAllowedUserId });
+            await this.showSettingsDashboard(interaction, 'access');
         }
     }
 
@@ -723,7 +823,7 @@ export class DiscordCodexBridge {
 
         if (prompt === null && !isCodexThread) return false;
 
-        if (!this.isAuthorized(message.author.id)) {
+        if (!(await this.isAuthorized(message.author.id))) {
             if (prompt !== null) {
                 await message.reply('Access denied.');
                 return true;
@@ -763,7 +863,8 @@ export class DiscordCodexBridge {
                 reasoningEffort,
                 dangerous: this.isPublishRequest(request),
                 chatName,
-                discordThreadId: thread.id
+                discordThreadId: thread.id,
+                requesterId: message.author.id
             });
             return true;
         }
@@ -777,7 +878,8 @@ export class DiscordCodexBridge {
             reasoningEffort,
             dangerous: this.isPublishRequest(request),
             chatName: this.getChatName(request),
-            discordThreadId: message.channel.isThread() ? message.channel.id : null
+            discordThreadId: message.channel.isThread() ? message.channel.id : null,
+            requesterId: message.author.id
         });
 
         return true;
@@ -886,7 +988,16 @@ export class DiscordCodexBridge {
                 ? `Usage limit reached on the active account.\n\n${result.error || result.text}`
                 : result.ok ? result.text : `${this.botName} failed.\n\n${result.error || result.text}`;
             if (!result.ok && this.isUsageLimitText(result.error || result.text)) {
-                await this.sendLimitResponse(target, result.error || result.text);
+                await this.sendLimitResponse(target, result.error || result.text, {
+                    kind: 'prompt',
+                    conversationKey,
+                    prompt,
+                    options: {
+                        ...options,
+                        fresh: false
+                    },
+                    requesterId: options.requesterId
+                });
                 return;
             }
             const latestMessage = await this.sendPages(
@@ -894,7 +1005,7 @@ export class DiscordCodexBridge {
                 this.withFooter(resultText, result),
                 result
             );
-            await this.ghostPingIfEnabled(target);
+            await this.ghostPingIfEnabled(target, options.requesterId);
             if (savedConversation) {
                 await saveConversation({
                     ...savedConversation,
@@ -951,7 +1062,11 @@ export class DiscordCodexBridge {
                 ? `Usage limit reached on the active account.\n\n${result.error || result.text}`
                 : result.ok ? result.text : `${this.botName} review failed.\n\n${result.error || result.text}`;
             if (!result.ok && this.isUsageLimitText(result.error || result.text)) {
-                await this.sendLimitResponse(target, result.error || result.text);
+                await this.sendLimitResponse(target, result.error || result.text, {
+                    kind: 'review',
+                    options,
+                    requesterId: options.requesterId
+                });
                 return;
             }
             await this.sendPages(
@@ -959,20 +1074,20 @@ export class DiscordCodexBridge {
                 this.withFooter(resultText, result),
                 result
             );
-            await this.ghostPingIfEnabled(target);
+            await this.ghostPingIfEnabled(target, options.requesterId);
         } finally {
             activeRuns.delete(conversationKey);
         }
     }
 
-    private async ghostPingIfEnabled(target: ResponseTarget): Promise<void> {
+    private async ghostPingIfEnabled(target: ResponseTarget, requesterId?: string): Promise<void> {
         const settings = await getBridgeSettings();
 
-        if (!getEffectiveReminderPings(settings, this.config.defaultReminderPings)) return;
+        if (!getEffectiveNotifyPromptFinished(settings, this.config.defaultReminderPings)) return;
         const channel = target.channel;
 
         if (!channel || !('send' in channel)) return;
-        const message = await (channel as any).send(this.getPrimaryUserMention()).catch(() => null);
+        const message = await (channel as any).send(await this.getUserMention(requesterId)).catch(() => null);
 
         if (!message) return;
         setTimeout(() => {
@@ -983,6 +1098,7 @@ export class DiscordCodexBridge {
     private async sendSteerOffer(target: ResponseTarget, conversationKey: string, prompt: string, options: PromptOptions): Promise<void> {
         const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
         pendingSteers.set(id, { conversationKey, prompt, options: { ...options, fresh: false } });
+        setTimeout(() => pendingSteers.delete(id), COMPONENT_IDLE_TTL_MS);
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
                 .setCustomId(`${STEER_BUTTON_ID}:${id}`)
@@ -1002,6 +1118,7 @@ export class DiscordCodexBridge {
     private async sendAccessRequest(target: ResponseTarget, conversationKey: string, prompt: string, options: PromptOptions): Promise<void> {
         const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
         pendingAccessRequests.set(id, { target, conversationKey, prompt, options });
+        setTimeout(() => pendingAccessRequests.delete(id), COMPONENT_IDLE_TTL_MS);
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
                 .setCustomId(`${ACCESS_APPROVE_ID}:${id}`)
@@ -1010,7 +1127,7 @@ export class DiscordCodexBridge {
         );
         const file = new AttachmentBuilder(await renderAccessRequestCard('This request needs access beyond the current directory policy.'), { name: 'discode-access.png' });
         const payload = {
-            content: this.getPrimaryUserMention(),
+            content: getEffectiveNotifyPermissionRequired(await getBridgeSettings()) ? await this.getUserMention(options.requesterId, target) : '',
             embeds: [],
             attachments: [],
             components: [row],
@@ -1050,24 +1167,52 @@ export class DiscordCodexBridge {
         });
     }
 
-    private async sendLimitResponse(target: ResponseTarget, message: string): Promise<Message | null> {
+    private async sendLimitResponse(target: ResponseTarget, message: string, retry: LimitRetry): Promise<Message | null> {
         const resetAt = this.extractResetTime(message);
         const image = await renderLimitCard(message, resetAt ? this.formatDate(resetAt) : '');
         const accounts = await this.accounts.listAccounts();
-        const components = accounts.length === 0 ? [] : [
-            new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+        const settings = await getBridgeSettings();
+        const retryId = this.createUsageSessionId();
+        const provider = retry.kind === 'prompt'
+            ? retry.options.provider || getEffectiveProvider(settings, this.config.defaultProvider)
+            : getEffectiveProvider(settings, this.config.defaultProvider);
+        const providerOptions = retry.kind === 'prompt'
+            ? getEffectiveProviderPriority(settings, this.config.defaultProviderPriority)
+                .filter(item => item !== provider)
+                .slice(0, 25)
+            : [];
+        const components: ActionRowBuilder<StringSelectMenuBuilder>[] = [];
+
+        pendingLimitRetries.set(retryId, {
+            retry,
+            expiresAt: Date.now() + COMPONENT_IDLE_TTL_MS
+        });
+        if (accounts.length > 0) {
+            components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
                 new StringSelectMenuBuilder()
-                    .setCustomId(LIMIT_ACCOUNT_SELECT_ID)
-                    .setPlaceholder('Switch account')
+                    .setCustomId(`${LIMIT_ACCOUNT_SELECT_ID}:${retryId}`)
+                    .setPlaceholder('Switch account and retry')
                     .addOptions(accounts.slice(0, 25).map(account => ({
                         label: this.getAccountAlias(account).slice(0, 100),
                         value: String(account.index),
-                        description: `Plan ${this.capitalize(account.planType)}`.slice(0, 100)
+                        description: `${this.capitalize(account.provider)} · ${account.credentialLabel}`.slice(0, 100)
                     })))
-            )
-        ];
+            ));
+        }
+        if (providerOptions.length > 0) {
+            components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                new StringSelectMenuBuilder()
+                    .setCustomId(`${LIMIT_PROVIDER_SELECT_ID}:${retryId}`)
+                    .setPlaceholder('Switch provider and retry')
+                    .addOptions(providerOptions.map(item => ({
+                        label: this.capitalize(item).slice(0, 100),
+                        value: item,
+                        description: 'Use this fallback provider for the retry.'
+                    })))
+            ));
+        }
         const payload = {
-            content: '',
+            content: getEffectiveNotifyUsageLimit(settings) ? await this.getUserMention(retry.requesterId, target) : '',
             embeds: [],
             attachments: [],
             components,
@@ -1081,6 +1226,31 @@ export class DiscordCodexBridge {
         }
 
         return target.editReply(payload);
+    }
+
+    private async runPendingLimitRetry(interaction: ComponentInteraction, retryId: string, overrides: Partial<PromptOptions>): Promise<void> {
+        const pending = pendingLimitRetries.get(retryId);
+
+        if (!pending || pending.expiresAt < Date.now()) {
+            pendingLimitRetries.delete(retryId);
+            await interaction.followUp({
+                content: 'That retry expired after 60 seconds of inactivity.',
+                flags: MessageFlags.Ephemeral
+            }).catch(() => undefined);
+            return;
+        }
+        pendingLimitRetries.delete(retryId);
+
+        if (pending.retry.kind === 'review') {
+            await this.runReview(interaction.message as Message, pending.retry.options);
+            return;
+        }
+
+        await this.runPrompt(interaction.message as Message, pending.retry.conversationKey, pending.retry.prompt, {
+            ...pending.retry.options,
+            ...overrides,
+            fresh: false
+        });
     }
 
     private async createTriagePrompt(client: Client, channelId: string, limit: number, focus: string): Promise<string> {
@@ -1221,7 +1391,7 @@ export class DiscordCodexBridge {
         return getEffectiveSlashResponsesEphemeral(settings) ? { flags: 64 as const } : {};
     }
 
-    private async showSettingsDashboard(interaction: ChatInputCommandInteraction | ButtonInteraction, page: SettingsPage = 'runtime'): Promise<void> {
+    private async showSettingsDashboard(interaction: ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction, page: SettingsPage = 'runtime'): Promise<void> {
         const settings = await getBridgeSettings();
         const image = await renderSettingsCard(settings, this.config, page);
         const payload = {
@@ -1401,6 +1571,7 @@ export class DiscordCodexBridge {
         if (!session) return null;
         const pageCount = Math.max(1, session.pages.length);
         const normalizedPage = Math.min(Math.max(page, 0), pageCount - 1);
+        session.createdAt = Date.now();
 
         return {
             components: this.createUsageRows(normalizedPage, sessionId, session.accounts),
@@ -1420,6 +1591,10 @@ export class DiscordCodexBridge {
             accountIndex: account ? normalizedPage + 1 : 0,
             accountCount: accounts.length,
             plan: usage?.planType || account?.planType || 'unknown',
+            provider: account?.provider || 'codex',
+            credential: account?.credentialLabel || 'Not configured',
+            active: account?.active || false,
+            credits: usage?.creditsBalance || null,
             primary: this.createUsageCardWindow('5-hour limit', usage?.primaryWindow),
             secondary: this.createUsageCardWindow('Weekly limit', usage?.secondaryWindow),
             generatedAt: new Date().toLocaleString()
@@ -1437,6 +1612,11 @@ export class DiscordCodexBridge {
                     .setLabel('Previous')
                     .setStyle(ButtonStyle.Secondary)
                     .setDisabled(normalizedPage === 0),
+                new ButtonBuilder()
+                    .setCustomId(`${USAGE_ACTIVATE_ACCOUNT_ID}:${normalizedPage + 1}`)
+                    .setLabel(accounts[normalizedPage]?.active ? 'Active account' : 'Use this account')
+                    .setStyle(accounts[normalizedPage]?.active ? ButtonStyle.Success : ButtonStyle.Primary)
+                    .setDisabled(accounts[normalizedPage]?.active === true),
                 new ButtonBuilder()
                     .setCustomId(`${USAGE_NEXT_ID}:${sessionId}:${Math.min(pageCount - 1, normalizedPage + 1)}`)
                     .setLabel('Next')
@@ -1660,13 +1840,16 @@ export class DiscordCodexBridge {
         ];
     }
 
-    private async createSettingsRows(page: SettingsPage = 'runtime'): Promise<ActionRowBuilder<StringSelectMenuBuilder>[]> {
+    private async createSettingsRows(page: SettingsPage = 'runtime'): Promise<ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[]> {
         const settings = await getBridgeSettings();
         const model = getEffectiveModel(settings, this.config.defaultModel);
         const reasoning = getEffectiveReasoning(settings);
         const provider = getEffectiveProvider(settings, this.config.defaultProvider);
+        const providerPriority = getEffectiveProviderPriority(settings, this.config.defaultProviderPriority);
         const permissionMode = getEffectivePermissionMode(settings, this.config.defaultPermissionMode);
-        const reminderPings = getEffectiveReminderPings(settings, this.config.defaultReminderPings);
+        const notifyPromptFinished = getEffectiveNotifyPromptFinished(settings, this.config.defaultReminderPings);
+        const notifyPermissionRequired = getEffectiveNotifyPermissionRequired(settings);
+        const notifyUsageLimit = getEffectiveNotifyUsageLimit(settings);
         const slashResponsesEphemeral = getEffectiveSlashResponsesEphemeral(settings);
         const modelOptions = listModelChoices().map(choice => ({
             label: choice.name.slice(0, 100),
@@ -1712,6 +1895,12 @@ export class DiscordCodexBridge {
                             description: choice.description,
                             default: choice.value === permissionMode
                         })))
+                ),
+                new ActionRowBuilder<ButtonBuilder>().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(ACCESS_USERS_BUTTON_ID)
+                        .setLabel('Edit allowed users')
+                        .setStyle(ButtonStyle.Secondary)
                 )
             ];
         }
@@ -1721,11 +1910,29 @@ export class DiscordCodexBridge {
                 pageRow,
                 new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
                     new StringSelectMenuBuilder()
-                        .setCustomId(REMINDER_SELECT_ID)
-                        .setPlaceholder(`Done ping: ${reminderPings ? 'On' : 'Off'}`)
+                        .setCustomId(NOTIFY_DONE_SELECT_ID)
+                        .setPlaceholder(`Prompt finished: ${notifyPromptFinished ? 'On' : 'Off'}`)
                         .addOptions([
-                            { label: 'On', value: 'on', description: 'Ghost ping you when a run finishes.', default: reminderPings },
-                            { label: 'Off', value: 'off', description: 'Do not ping after completion.', default: !reminderPings }
+                            { label: 'On', value: 'on', description: 'Notify the prompter when a run finishes.', default: notifyPromptFinished },
+                            { label: 'Off', value: 'off', description: 'Do not notify when a run finishes.', default: !notifyPromptFinished }
+                        ])
+                ),
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(NOTIFY_PERMISSION_SELECT_ID)
+                        .setPlaceholder(`Permission needed: ${notifyPermissionRequired ? 'On' : 'Off'}`)
+                        .addOptions([
+                            { label: 'On', value: 'on', description: 'Notify the prompter when permission is needed.', default: notifyPermissionRequired },
+                            { label: 'Off', value: 'off', description: 'Do not notify for permission requests.', default: !notifyPermissionRequired }
+                        ])
+                ),
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(NOTIFY_LIMIT_SELECT_ID)
+                        .setPlaceholder(`Usage limits: ${notifyUsageLimit ? 'On' : 'Off'}`)
+                        .addOptions([
+                            { label: 'On', value: 'on', description: 'Notify the prompter when a provider hits limits.', default: notifyUsageLimit },
+                            { label: 'Off', value: 'off', description: 'Do not notify for usage limits.', default: !notifyUsageLimit }
                         ])
                 ),
                 new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
@@ -1751,6 +1958,19 @@ export class DiscordCodexBridge {
                         value: choice.value,
                         description: choice.description,
                         default: choice.value === provider
+                    })))
+            ),
+            new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                new StringSelectMenuBuilder()
+                    .setCustomId(PROVIDER_PRIORITY_SELECT_ID)
+                    .setPlaceholder('Fallback priority')
+                    .setMinValues(1)
+                    .setMaxValues(providerChoices.length)
+                    .addOptions(providerChoices.map(choice => ({
+                        label: choice.label,
+                        value: choice.value,
+                        description: choice.description,
+                        default: providerPriority.includes(choice.value)
                     })))
             ),
             new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
@@ -1855,6 +2075,37 @@ export class DiscordCodexBridge {
                         .setCustomId('args')
                         .setLabel('Args')
                         .setStyle(TextInputStyle.Paragraph)
+                        .setRequired(false)
+                )
+            );
+    }
+
+    private async createAccessUsersModal(): Promise<ModalBuilder> {
+        const settings = await getBridgeSettings();
+        const allowedUserIds = Array.from(new Set([
+            ...this.config.allowedUserIds,
+            ...(settings.allowedUserIds || [])
+        ].map(value => value.trim()).filter(Boolean)));
+        const primaryAllowedUserId = settings.primaryAllowedUserId || this.config.primaryAllowedUserId || allowedUserIds[0] || '';
+
+        return new ModalBuilder()
+            .setCustomId(ACCESS_USERS_MODAL_ID)
+            .setTitle('Allowed users')
+            .addComponents(
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('allowedUsers')
+                        .setLabel('Allowed Discord user IDs')
+                        .setStyle(TextInputStyle.Paragraph)
+                        .setValue(allowedUserIds.join(', '))
+                        .setRequired(true)
+                ),
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('primaryUser')
+                        .setLabel('Primary notification user ID')
+                        .setStyle(TextInputStyle.Short)
+                        .setValue(primaryAllowedUserId)
                         .setRequired(false)
                 )
             );
@@ -2001,12 +2252,65 @@ export class DiscordCodexBridge {
         return false;
     }
 
-    private isAuthorized(userId: string): boolean {
-        return this.config.allowedUserIds.includes(userId);
+    private async isAuthorized(userId: string): Promise<boolean> {
+        return (await this.getAllowedUserIds()).includes(userId);
     }
 
-    private getPrimaryUserMention(): string {
-        return `<@${this.config.primaryAllowedUserId || this.config.allowedUserIds[0]}>`;
+    private async getAllowedUserIds(): Promise<string[]> {
+        const settings = await getBridgeSettings();
+
+        return Array.from(new Set([
+            ...this.config.allowedUserIds,
+            ...(settings.allowedUserIds || [])
+        ].map(value => value.trim()).filter(Boolean)));
+    }
+
+    private async getUserMention(requesterId?: string, target?: ResponseTarget): Promise<string> {
+        const settings = await getBridgeSettings();
+        const allowedUserIds = await this.getAllowedUserIds();
+        const userId = requesterId
+            || (target instanceof Message ? target.author.id : target?.user.id)
+            || settings.primaryAllowedUserId
+            || this.config.primaryAllowedUserId
+            || allowedUserIds[0];
+
+        return userId ? `<@${userId}>` : '';
+    }
+
+    private parseUserIds(value: string): string[] {
+        return Array.from(new Set((value.match(/\d{15,25}/g) || []).map(item => item.trim()).filter(Boolean)));
+    }
+
+    private async expireInactiveComponent(interaction: ComponentInteraction): Promise<boolean> {
+        this.pruneComponentActivity();
+        const messageId = interaction.message.id;
+        const lastActive = componentMessageActivity.get(messageId) || interaction.message.createdTimestamp || Date.now();
+
+        if (Date.now() - lastActive <= COMPONENT_IDLE_TTL_MS) {
+            componentMessageActivity.set(messageId, Date.now());
+            return false;
+        }
+        componentMessageActivity.delete(messageId);
+        pendingLimitRetries.forEach((pending, id) => {
+            if (pending.expiresAt < Date.now()) pendingLimitRetries.delete(id);
+        });
+        await interaction.reply({
+            content: 'This interaction expired after 60 seconds of inactivity.',
+            flags: MessageFlags.Ephemeral
+        }).catch(() => undefined);
+        await interaction.message.edit({ components: [] }).catch(() => undefined);
+
+        return true;
+    }
+
+    private pruneComponentActivity(): void {
+        const now = Date.now();
+
+        for (const [messageId, lastActive] of componentMessageActivity) {
+            if (now - lastActive > COMPONENT_IDLE_TTL_MS) {
+                componentMessageActivity.delete(messageId);
+            }
+        }
     }
 
     private async resolveProject(workspace?: string, model?: string): Promise<{ workspace: string; model?: string | null }> {

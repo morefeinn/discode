@@ -31,6 +31,7 @@ export interface CodexReviewOptions {
     ref?: string | null;
     instructions?: string | null;
     onEvent?: CodexEventHandler;
+    requesterId?: string;
 }
 
 export interface CodexRunResult {
@@ -448,8 +449,8 @@ export class CodexRunner {
             return accountProvider;
         }
 
-        if (provider === 'opencode' || provider === 'custom') return provider;
-        if (this.config.defaultProvider === 'opencode' || this.config.defaultProvider === 'custom') return this.config.defaultProvider;
+        if (this.isProviderType(provider)) return provider;
+        if (this.isProviderType(this.config.defaultProvider)) return this.config.defaultProvider;
 
         return 'codex';
     }
@@ -478,11 +479,37 @@ export class CodexRunner {
             return { bin: this.config.opencodeBin, args };
         }
 
+        if (provider === 'anthropic') {
+            return { bin: this.config.anthropicBin, args: ['-p', options.prompt || ''] };
+        }
+
+        if (provider === 'zai') {
+            return { bin: this.config.zaiBin, args: ['-p', options.prompt || ''] };
+        }
+
+        if (provider === 'qwen') {
+            return { bin: this.config.qwenBin, args: ['-p', options.prompt || ''] };
+        }
+
         return { bin: 'sh', args: ['-lc', 'printf "%s\\n" "DISCODE_PROVIDER_COMMAND is required for the custom provider." >&2; exit 1'] };
     }
 
     private isAccountProvider(provider: AccountProvider | null): provider is ProviderType {
-        return provider === 'codex' || provider === 'opencode' || provider === 'custom';
+        return provider === 'codex'
+            || provider === 'opencode'
+            || provider === 'anthropic'
+            || provider === 'zai'
+            || provider === 'qwen'
+            || provider === 'custom';
+    }
+
+    private isProviderType(provider: string | undefined): provider is ProviderType {
+        return provider === 'codex'
+            || provider === 'opencode'
+            || provider === 'anthropic'
+            || provider === 'zai'
+            || provider === 'qwen'
+            || provider === 'custom';
     }
 }
 
@@ -576,7 +603,7 @@ function extractJsonErrors(stdout: string): string {
 }
 
 function looksLikeLimit(text: string): boolean {
-    return /usage limit|rate limit|quota|too many requests|429|try again at/i.test(text);
+    return /usage limit|rate limit|quota|too many requests|429|try again at|weekly limit|5.?hour|credit limit|insufficient credits/i.test(text);
 }
 
 function parseArgs(input: string): string[] {

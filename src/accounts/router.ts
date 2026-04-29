@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-export type AccountProvider = 'codex' | 'opencode' | 'custom';
+export type AccountProvider = 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'custom';
 
 export interface DiscodeAccount {
     id: string;
@@ -15,7 +15,9 @@ export interface DiscodeAccount {
     auth_data?: Record<string, unknown>;
     env?: Record<string, string>;
     command?: string;
+    usage_command?: string;
     model?: string;
+    priority?: number;
     last_used_at?: string;
 }
 
@@ -32,6 +34,7 @@ export interface AccountSummary {
     email: string;
     provider: AccountProvider;
     planType: string;
+    credentialLabel: string;
     subscriptionExpiresAt: string;
     lastUsedAt: string;
     active: boolean;
@@ -68,13 +71,14 @@ export class AccountRouter {
     async listAccounts(): Promise<AccountSummary[]> {
         const state = await this.readState();
 
-        return state.accounts.map((account, index) => ({
+        return this.getOrderedAccounts(state).map(({ account, originalIndex }, index) => ({
             index: index + 1,
             id: account.id,
-            name: this.accountName(account, index),
-            email: 'hidden',
+            name: this.accountName(account, originalIndex),
+            email: this.maskEmail(account.email),
             provider: this.normalizeProvider(account.provider),
             planType: account.plan_type || this.authMode(account) || 'unknown',
+            credentialLabel: this.credentialLabel(account),
             subscriptionExpiresAt: account.subscription_expires_at || 'unknown',
             lastUsedAt: account.last_used_at || 'never',
             active: account.id === state.active_account_id
@@ -206,21 +210,23 @@ export class AccountRouter {
     }
 
     private findNextAccount(state: AccountState): DiscodeAccount {
-        const activeIndex = state.accounts.findIndex(account => account.id === state.active_account_id);
-        const nextIndex = activeIndex < 0 ? 0 : (activeIndex + 1) % state.accounts.length;
+        const accounts = this.getOrderedAccounts(state).map(item => item.account);
+        const activeIndex = accounts.findIndex(account => account.id === state.active_account_id);
+        const nextIndex = activeIndex < 0 ? 0 : (activeIndex + 1) % accounts.length;
 
-        return state.accounts[nextIndex];
+        return accounts[nextIndex];
     }
 
     private findAccount(state: AccountState, query: string): DiscodeAccount | null {
         const normalized = query.trim().toLowerCase();
         const index = Number(normalized);
+        const accounts = this.getOrderedAccounts(state).map(item => item.account);
 
-        if (Number.isInteger(index) && index >= 1 && index <= state.accounts.length) {
-            return state.accounts[index - 1];
+        if (Number.isInteger(index) && index >= 1 && index <= accounts.length) {
+            return accounts[index - 1];
         }
 
-        return state.accounts.find(account =>
+        return accounts.find(account =>
             account.id.toLowerCase().startsWith(normalized)
             || account.name.toLowerCase() === normalized
             || account.name.toLowerCase().includes(normalized)
@@ -246,9 +252,26 @@ export class AccountRouter {
     }
 
     private normalizeProvider(provider: string | undefined): AccountProvider {
-        if (provider === 'opencode' || provider === 'custom') return provider;
+        if (provider === 'opencode'
+            || provider === 'anthropic'
+            || provider === 'zai'
+            || provider === 'qwen'
+            || provider === 'custom') {
+            return provider;
+        }
 
         return 'codex';
+    }
+
+    private getOrderedAccounts(state: AccountState): { account: DiscodeAccount; originalIndex: number }[] {
+        return state.accounts
+            .map((account, originalIndex) => ({ account, originalIndex }))
+            .sort((left, right) => {
+                const leftPriority = Number.isFinite(left.account.priority) ? Number(left.account.priority) : left.originalIndex + 1000;
+                const rightPriority = Number.isFinite(right.account.priority) ? Number(right.account.priority) : right.originalIndex + 1000;
+
+                return leftPriority - rightPriority || left.originalIndex - right.originalIndex;
+            });
     }
 
     private authMode(account: DiscodeAccount): string {
@@ -265,6 +288,43 @@ export class AccountRouter {
         if (!name || name.includes('@')) return `Account ${index + 1}`;
 
         return name;
+    }
+
+    private credentialLabel(account: DiscodeAccount): string {
+        const provider = this.normalizeProvider(account.provider);
+        const authMode = this.authMode(account);
+        const authData = account.auth_data || {};
+        const envKey = this.stringValue(authData.env_key);
+        const apiKey = this.stringValue(authData.api_key) || this.stringValue(authData.key) || this.stringValue(authData.token);
+
+        if (apiKey) return `${envKey || this.defaultApiKeyName(provider)} ${this.maskSecret(apiKey)}`;
+        if (account.email) return this.maskEmail(account.email);
+        if (authMode) return authMode;
+
+        return provider;
+    }
+
+    private defaultApiKeyName(provider: AccountProvider): string {
+        if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
+        if (provider === 'zai') return 'ZAI_API_KEY';
+        if (provider === 'qwen') return 'QWEN_API_KEY';
+
+        return 'OPENAI_API_KEY';
+    }
+
+    private maskEmail(value: string | undefined): string {
+        if (!value) return 'hidden';
+        const [name, domain] = value.split('@');
+
+        if (!name || !domain) return 'hidden';
+
+        return `${name.slice(0, 2)}***@${domain}`;
+    }
+
+    private maskSecret(value: string): string {
+        if (value.length <= 8) return 'configured';
+
+        return `...${value.slice(-4)}`;
     }
 
     private assignAuthEnv(env: Record<string, string>, key: string, value: unknown): void {

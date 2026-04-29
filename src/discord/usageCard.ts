@@ -13,6 +13,10 @@ export interface UsageCardData {
     accountIndex: number;
     accountCount: number;
     plan: string;
+    provider: string;
+    credential: string;
+    active: boolean;
+    credits: string | null;
     primary: UsageCardWindow;
     secondary: UsageCardWindow;
     generatedAt: string;
@@ -33,24 +37,28 @@ function renderSvg(data: UsageCardData): string {
         '<rect x="1" y="1" width="1198" height="758" rx="34" fill="#202123" stroke="#343541" stroke-width="2"/>',
         text(pageLabel, 1112, 74, 22, 240, '#8e8ea0', 600, 'end'),
         text(data.accountName, 88, 116, 42, 400, '#f7f7f8', 780),
-        meta('Plan', capitalize(data.plan), 88, 174, 180),
-        windowBlock(data.primary, 72, 258, 1056),
-        windowBlock(data.secondary, 72, 454, 1056),
+        meta('Provider', providerLabel(data.provider), 88, 174, 180),
+        meta('Plan', capitalize(data.plan), 300, 174, 180),
+        meta('Credential', data.credential, 512, 174, 300),
+        meta('Status', data.active ? 'Active' : 'Available', 844, 174, 180),
+        data.credits ? text(`Credits: ${data.credits}`, 88, 238, 20, 480, '#8e8ea0', 560) : '',
+        windowBlock(data.primary, 72, 284, 1056),
+        windowBlock(data.secondary, 72, 500, 1056),
         text(data.generatedAt, 600, 704, 20, 360, '#8e8ea0', 500, 'middle'),
         '</svg>'
     ].join('');
 }
 
 function windowBlock(window: UsageCardWindow, x: number, y: number, width: number): string {
-    const percentLabel = window.percent === null ? 'Unknown' : `${formatPercent(window.percent)} used`;
+    const percentLabel = window.percent === null ? 'Unknown' : `${formatPercent(100 - window.percent)} remaining`;
     const reset = `Resets ${window.reset}`;
 
     return [
-        `<rect x="${x}" y="${y}" width="${width}" height="160" rx="24" fill="#26272b" stroke="#343541" stroke-width="2"/>`,
+        `<rect x="${x}" y="${y}" width="${width}" height="184" rx="24" fill="#26272b" stroke="#343541" stroke-width="2"/>`,
         text(window.label, x + 30, y + 54, 31, width - 60, '#f7f7f8', 760),
         text(percentLabel, x + width - 30, y + 54, 29, 210, '#f7f7f8', 760, 'end'),
-        bar(window.percent, x + 30, y + 82, width - 60, 28),
-        text(`${window.duration} · ${reset}`, x + 30, y + 132, 23, width - 60, '#8e8ea0', 520)
+        bar(window.percent, x + 30, y + 94, width - 60, 28),
+        text(`${window.duration} · ${reset}`, x + 30, y + 158, 23, width - 60, '#8e8ea0', 520)
     ].join('');
 }
 
@@ -102,6 +110,14 @@ function capitalize(value: string): string {
     if (!value) return value;
 
     return value.slice(0, 1).toUpperCase() + value.slice(1);
+}
+
+function providerLabel(value: string): string {
+    if (value === 'zai') return 'Z.ai';
+    if (value === 'qwen') return 'Qwen';
+    if (value === 'anthropic') return 'Anthropic';
+
+    return capitalize(value);
 }
 
 function formatPercent(percent: number): string {
