@@ -38,9 +38,9 @@ client.once(Events.ClientReady, async () => {
     console.log(`Discode logged in as ${client.user?.tag}`);
 
     try {
-        const commandName = await registerSlashCommands(config, botName);
-        bridge.setBotIdentity(botName, commandName);
-        console.log(`Registered /${commandName} slash commands.`);
+        const registered = await registerSlashCommands(config, botName, [...client.guilds.cache.keys()]);
+        bridge.setBotIdentity(botName, registered.primaryName);
+        console.log(`Registered slash commands: ${registered.names.join(', ')}.`);
         await bridge.recoverRunningRuns(client);
     } catch (error) {
         console.error('Failed to register slash commands:', error);

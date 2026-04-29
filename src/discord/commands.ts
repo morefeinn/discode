@@ -9,7 +9,12 @@ import {
 } from 'discord.js';
 import { BridgeConfig } from '../config.js';
 
-export async function registerSlashCommands(config: BridgeConfig, botName: string): Promise<string> {
+export interface RegisteredSlashCommands {
+    primaryName: string;
+    names: string[];
+}
+
+export async function registerSlashCommands(config: BridgeConfig, botName: string, connectedGuildIds: string[] = []): Promise<RegisteredSlashCommands> {
     const commandName = resolveCommandName(config, botName);
     const displayName = cleanDisplayName(botName);
     const command = new SlashCommandBuilder()
@@ -192,6 +197,7 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
     const rest = new REST({ version: '10' }).setToken(config.token);
     const guildId = process.env.DISCORD_GUILD_ID?.trim();
     const body = commandName === 'init' ? [command.toJSON()] : [command.toJSON(), initCommand.toJSON()];
+    const commandNames = body.map(item => `/${item.name}`);
     const globalBody = body.map(item => ({
         ...item,
         contexts: [
@@ -222,11 +228,16 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
         await rest.put(Routes.applicationCommands(config.clientId), { body: botInstallBody });
     }
 
-    if (guildId) {
+    const guildIds = Array.from(new Set([guildId, ...connectedGuildIds].filter((value): value is string => Boolean(value))));
+
+    for (const guildId of guildIds) {
         await rest.put(Routes.applicationGuildCommands(config.clientId, guildId), { body });
     }
 
-    return commandName;
+    return {
+        primaryName: commandName,
+        names: commandNames
+    };
 }
 
 function addToolOption(option: SlashCommandStringOption): SlashCommandStringOption {

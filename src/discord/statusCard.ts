@@ -9,7 +9,7 @@ const CARD_Y = 16;
 const CARD_WIDTH = 828;
 const CARD_HEIGHT = 288;
 const THINKING_FRAMES = 60;
-const THINKING_FRAME_DELAY_MS = 16;
+const THINKING_FRAME_DELAY_MS = 32;
 
 export async function renderThinkingGif(task: string, agentName: string): Promise<Buffer> {
     const frames = await Promise.all(Array.from({ length: THINKING_FRAMES }, (_value, index) => renderRaw(renderThinkingSvg(task, cleanAgentName(agentName), index), WIDTH, HEIGHT)));
