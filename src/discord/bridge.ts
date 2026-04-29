@@ -70,12 +70,14 @@ import { getTranscript } from '../state/transcript.js';
 import { recordUsageLimit } from '../state/usage.js';
 import { renderChatCard } from './chatCard.js';
 import { collectDiscordContext, collectTargetChannelContext, withDiscordContext } from './context.js';
+import { createInitPrompt } from './initPrompt.js';
 import { renderMcpCard } from './mcpCard.js';
 import { renderAccessRequestCard, renderLimitCard, renderThinkingGif, renderUsageStatsCard } from './statusCard.js';
 import { renderSettingsCard, SettingsPage } from './settingsCard.js';
 import { renderTerminalCard } from './terminalCard.js';
 import { runTerminalCommand } from './terminal.js';
 import { sanitizeDiscordText, splitDiscordText } from './text.js';
+import { parseToolTags, withToolTagGuidance } from './toolTags.js';
 import { renderUsageCard, UsageCardData, UsageCardWindow } from './usageCard.js';
 import { renderWorkspaceCard, WorkspaceCardGit } from './workspaceCard.js';
 
@@ -216,7 +218,7 @@ export class DiscordCodexBridge {
     }
 
     async handleAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
-        if (interaction.commandName !== this.commandName) return;
+        if (interaction.commandName !== this.commandName && interaction.commandName !== 'init') return;
         if (!(await this.isAuthorized(interaction.user.id))) {
             await interaction.respond([]);
             return;
@@ -260,12 +262,22 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.commandName === 'init') {
+            await this.handleInitInteraction(interaction);
+            return;
+        }
+
         if (interaction.commandName !== this.commandName) return;
 
         const subcommand = interaction.options.getSubcommand();
 
         if (subcommand === 'project' || subcommand === 'workspace') {
             await this.showWorkspaceDashboard(interaction);
+            return;
+        }
+
+        if (subcommand === 'init') {
+            await this.handleInitInteraction(interaction);
             return;
         }
 
@@ -311,6 +323,7 @@ export class DiscordCodexBridge {
             const prompt = subcommand === 'prompt'
                 ? interaction.options.getString('prompt', true)
                 : interaction.options.getString('prompt') || `Start a fresh ${this.botName} conversation and acknowledge readiness.`;
+            const tools = parseToolTags(prompt, interaction.options.getString('tools'));
             const project = await this.resolveProject(interaction.options.getString('workspace') || undefined, interaction.options.getString('model') || undefined);
             const settings = await getBridgeSettings();
             const selectedModel = interaction.options.getString('model') || project.model || settings.model || undefined;
@@ -326,7 +339,7 @@ export class DiscordCodexBridge {
                 await interaction.editReply(`Opened ${thread.url}`);
                 const statusMessage = await this.sendThinkingMessage(thread, `Starting ${chatName}`);
                 const discordContext = await collectDiscordContext(interaction, interaction.client, prompt);
-                const codexPrompt = this.withRobloxMcpGuidance(withDiscordContext(prompt, discordContext));
+                const codexPrompt = this.withPromptGuidance(withDiscordContext(prompt, discordContext), tools);
                 await this.runPrompt(statusMessage, thread.id, codexPrompt, {
                     fresh: true,
                     workspace: project.workspace,
@@ -344,7 +357,7 @@ export class DiscordCodexBridge {
 
             await interaction.deferReply(await this.getSlashReplyOptions());
             const discordContext = await collectDiscordContext(interaction, interaction.client, prompt);
-            const codexPrompt = this.withRobloxMcpGuidance(withDiscordContext(prompt, discordContext));
+            const codexPrompt = this.withPromptGuidance(withDiscordContext(prompt, discordContext), tools);
             await this.runPrompt(interaction, interaction.channelId, codexPrompt, {
                 fresh: subcommand === 'new' || interaction.options.getBoolean('new') === true,
                 workspace: project.workspace,
@@ -367,11 +380,12 @@ export class DiscordCodexBridge {
             const permissionMode = getEffectivePermissionMode(settings, this.config.defaultPermissionMode);
             const scope = interaction.options.getString('scope', true) as 'uncommitted' | 'base' | 'commit';
             const instructions = interaction.options.getString('instructions') || '';
+            const tools = parseToolTags(instructions, interaction.options.getString('tools'));
             const discordContext = await collectDiscordContext(interaction, interaction.client, instructions);
             await this.runReview(interaction, {
                 scope,
                 ref: interaction.options.getString('ref'),
-                instructions: withDiscordContext(instructions || 'Review the requested diff.', discordContext),
+                instructions: this.withPromptGuidance(withDiscordContext(instructions || 'Review the requested diff.', discordContext), tools),
                 workspace: project.workspace,
                 model: selectedModel,
                 permissionMode: permissionMode === 'auto-review' ? 'auto-review' : undefined,
@@ -386,6 +400,7 @@ export class DiscordCodexBridge {
             const targetChannel = interaction.options.getChannel('channel', true) as any;
             const limit = interaction.options.getInteger('limit') || 25;
             const focus = interaction.options.getString('focus') || '';
+            const tools = parseToolTags(focus, interaction.options.getString('tools'));
             const project = await this.resolveProject(interaction.options.getString('workspace') || undefined, interaction.options.getString('model') || undefined);
             const settings = await getBridgeSettings();
             const selectedModel = interaction.options.getString('model') || project.model || settings.model || undefined;
@@ -400,7 +415,7 @@ export class DiscordCodexBridge {
                 const thread = await this.createThread(interaction.channel as TextChannel, chatName);
                 await interaction.editReply(`Opened ${thread.url}`);
                 const statusMessage = await this.sendThinkingMessage(thread, `Starting ${chatName}`);
-                const codexPrompt = await this.createTriagePrompt(interaction.client, targetChannel.id, limit, focus);
+                const codexPrompt = this.withPromptGuidance(await this.createTriagePrompt(interaction.client, targetChannel.id, limit, focus), tools);
                 await this.runPrompt(statusMessage, thread.id, codexPrompt, {
                     fresh: true,
                     workspace: project.workspace,
@@ -417,7 +432,7 @@ export class DiscordCodexBridge {
             }
 
             await interaction.deferReply(await this.getSlashReplyOptions());
-            const codexPrompt = await this.createTriagePrompt(interaction.client, targetChannel.id, limit, focus);
+            const codexPrompt = this.withPromptGuidance(await this.createTriagePrompt(interaction.client, targetChannel.id, limit, focus), tools);
             await this.runPrompt(interaction, interaction.channelId, codexPrompt, {
                 workspace: project.workspace,
                 model: selectedModel,
@@ -451,6 +466,55 @@ export class DiscordCodexBridge {
             return;
         }
 
+    }
+
+    private async handleInitInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
+        const project = await this.resolveProject(
+            interaction.options.getString('workspace') || undefined,
+            interaction.options.getString('model') || undefined
+        );
+        const settings = await getBridgeSettings();
+        const selectedModel = interaction.options.getString('model') || project.model || settings.model || undefined;
+        const reasoningEffort = getEffectiveReasoning(settings);
+        const provider = getEffectiveProvider(settings, this.config.defaultProvider);
+        const permissionMode = getEffectivePermissionMode(settings, this.config.defaultPermissionMode);
+        const tools = parseToolTags(interaction.options.getString('tools'));
+        const prompt = this.withPromptGuidance(createInitPrompt(project.workspace), tools);
+        const chatName = 'Initialize workspace';
+        const shouldCreateThread = Boolean(interaction.guild && interaction.channel && !interaction.channel.isThread());
+
+        if (shouldCreateThread) {
+            await interaction.deferReply(await this.getSlashReplyOptions());
+            const thread = await this.createThread(interaction.channel as TextChannel, chatName);
+            await interaction.editReply(`Opened ${thread.url}`);
+            const statusMessage = await this.sendThinkingMessage(thread, `Starting ${chatName}`);
+            await this.runPrompt(statusMessage, thread.id, prompt, {
+                fresh: true,
+                workspace: project.workspace,
+                model: selectedModel,
+                provider,
+                permissionMode,
+                reasoningEffort,
+                dangerous: interaction.options.getBoolean('dangerous') === true,
+                chatName,
+                discordThreadId: thread.id,
+                requesterId: interaction.user.id
+            });
+            return;
+        }
+
+        await interaction.deferReply(await this.getSlashReplyOptions());
+        await this.runPrompt(interaction, interaction.channelId, prompt, {
+            fresh: true,
+            workspace: project.workspace,
+            model: selectedModel,
+            provider,
+            permissionMode,
+            reasoningEffort,
+            dangerous: interaction.options.getBoolean('dangerous') === true,
+            chatName,
+            requesterId: interaction.user.id
+        });
     }
 
     async handleComponent(interaction: ComponentInteraction): Promise<void> {
@@ -848,7 +912,10 @@ export class DiscordCodexBridge {
         const provider = getEffectiveProvider(settings, this.config.defaultProvider);
         const permissionMode = getEffectivePermissionMode(settings, this.config.defaultPermissionMode);
         const naturalToolPrompt = await this.createNaturalToolPrompt(message, client, request);
-        const codexPrompt = this.withRobloxMcpGuidance(naturalToolPrompt || withDiscordContext(request, await collectDiscordContext(message, client, request)));
+        const codexPrompt = this.withPromptGuidance(
+            naturalToolPrompt || withDiscordContext(request, await collectDiscordContext(message, client, request)),
+            parseToolTags(request)
+        );
 
         if (message.guild && !message.channel.isThread()) {
             const chatName = this.getChatName(request);
@@ -1283,6 +1350,10 @@ export class DiscordCodexBridge {
             'Inspect the active Studio instance first, use Roblox Studio publish APIs through execute_luau when appropriate, and report the exact result back to Discord.',
             'Do not publish unless the user request clearly asks for publishing, production, deployment, or pushing live.'
         ].filter(Boolean).join('\n');
+    }
+
+    private withPromptGuidance(prompt: string, tools = parseToolTags(prompt)): string {
+        return this.withRobloxMcpGuidance(withToolTagGuidance(prompt, tools));
     }
 
     private isPublishRequest(prompt: string): boolean {

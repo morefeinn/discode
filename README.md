@@ -83,8 +83,10 @@ The slash command name follows the bot username unless `DISCODE_COMMAND_NAME` is
 
 Core commands:
 
+- `/init`
 - `/codex prompt`
 - `/codex new`
+- `/codex init`
 - `/codex review`
 - `/codex triage`
 - `/codex usage`
@@ -96,6 +98,10 @@ Core commands:
 - `/codex archive`
 
 Mentions and normal messages in Discode-created threads continue the current conversation. Message replies, channel mentions, files, and screenshots are included as context when the bot can read them.
+
+`/init` and `/codex init` initialize the active workspace by asking the agent to inspect the project and create or update `AGENTS.md`.
+
+Prompts, reviews, triage, and init support tool tags. Put tags in the prompt text, for example `@browser-use` or `@computer-use`, or pass comma-separated tags through the `tools` option.
 
 ## Accounts
 

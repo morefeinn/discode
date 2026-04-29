@@ -1,4 +1,12 @@
-import { ApplicationIntegrationType, ChannelType, InteractionContextType, REST, Routes, SlashCommandBuilder } from 'discord.js';
+import {
+    ApplicationIntegrationType,
+    ChannelType,
+    InteractionContextType,
+    REST,
+    Routes,
+    SlashCommandBuilder,
+    SlashCommandStringOption
+} from 'discord.js';
 import { BridgeConfig } from '../config.js';
 
 export async function registerSlashCommands(config: BridgeConfig, botName: string): Promise<string> {
@@ -27,6 +35,7 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
             .addAttachmentOption(option => option
                 .setName('file')
                 .setDescription(`File or screenshot for ${displayName} to review.`))
+            .addStringOption(option => addToolOption(option))
             .addBooleanOption(option => option
                 .setName('dangerous')
                 .setDescription(`Use ${displayName} bypass mode for this run.`)))
@@ -45,7 +54,22 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
                 .setDescription('Model override.'))
             .addAttachmentOption(option => option
                 .setName('file')
-                .setDescription(`File or screenshot for ${displayName} to review.`)))
+                .setDescription(`File or screenshot for ${displayName} to review.`))
+            .addStringOption(option => addToolOption(option)))
+        .addSubcommand(subcommand => subcommand
+            .setName('init')
+            .setDescription('Initialize agent instructions for the active workspace.')
+            .addStringOption(option => option
+                .setName('workspace')
+                .setDescription(`Working directory or saved project for ${displayName}.`)
+                .setAutocomplete(true))
+            .addStringOption(option => option
+                .setName('model')
+                .setDescription('Model override.'))
+            .addStringOption(option => addToolOption(option))
+            .addBooleanOption(option => option
+                .setName('dangerous')
+                .setDescription(`Use ${displayName} bypass mode for this run.`)))
         .addSubcommand(subcommand => subcommand
             .setName('review')
             .setDescription('Run an agent code review.')
@@ -74,6 +98,7 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
             .addAttachmentOption(option => option
                 .setName('file')
                 .setDescription('File or screenshot to include in review context.'))
+            .addStringOption(option => addToolOption(option))
             .addBooleanOption(option => option
                 .setName('dangerous')
                 .setDescription(`Use ${displayName} bypass mode for this run.`)))
@@ -107,6 +132,7 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
             .addStringOption(option => option
                 .setName('model')
                 .setDescription('Model override.'))
+            .addStringOption(option => addToolOption(option))
             .addBooleanOption(option => option
                 .setName('dangerous')
                 .setDescription(`Use ${displayName} bypass mode for this run.`)))
@@ -149,9 +175,23 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
                 .setRequired(true)
                 .setAutocomplete(true)));
 
+    const initCommand = new SlashCommandBuilder()
+        .setName('init')
+        .setDescription('Initialize agent instructions for the active workspace.')
+        .addStringOption(option => option
+            .setName('workspace')
+            .setDescription(`Working directory or saved project for ${displayName}.`)
+            .setAutocomplete(true))
+        .addStringOption(option => option
+            .setName('model')
+            .setDescription('Model override.'))
+        .addStringOption(option => addToolOption(option))
+        .addBooleanOption(option => option
+            .setName('dangerous')
+            .setDescription(`Use ${displayName} bypass mode for this run.`));
     const rest = new REST({ version: '10' }).setToken(config.token);
     const guildId = process.env.DISCORD_GUILD_ID?.trim();
-    const body = [command.toJSON()];
+    const body = commandName === 'init' ? [command.toJSON()] : [command.toJSON(), initCommand.toJSON()];
     const globalBody = body.map(item => ({
         ...item,
         contexts: [
@@ -187,6 +227,12 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
     }
 
     return commandName;
+}
+
+function addToolOption(option: SlashCommandStringOption): SlashCommandStringOption {
+    return option
+        .setName('tools')
+        .setDescription('Tool tags, comma separated, like browser-use or computer-use.');
 }
 
 export function resolveCommandName(config: BridgeConfig, botName: string): string {
