@@ -111,6 +111,8 @@ type DashboardView = { components: ActionRowBuilder<ButtonBuilder | StringSelect
 
 const execFileAsync = promisify(execFile);
 const activeRuns = new Set<string>();
+const activeRunControllers = new Map<string, AbortController>();
+const interruptedRuns = new Set<string>();
 const usageDashboardSessions = new Map<string, UsageDashboardSession>();
 const pendingSteers = new Map<string, PendingSteer>();
 const queuedSteers = new Map<string, QueuedSteer[]>();
@@ -140,6 +142,7 @@ const CHAT_LINK_SELECT_ID = 'codex:chat-link';
 const ACCOUNT_SELECT_ID = 'codex:switch-account';
 const LIMIT_ACCOUNT_SELECT_ID = 'codex:limit-switch-account';
 const LIMIT_PROVIDER_SELECT_ID = 'codex:limit-switch-provider';
+const QUEUE_PROMPT_BUTTON_ID = 'codex:queue-prompt';
 const STEER_BUTTON_ID = 'codex:steer';
 const USAGE_PREV_ID = 'codex:usage-prev';
 const USAGE_NEXT_ID = 'codex:usage-next';
@@ -573,7 +576,10 @@ export class DiscordCodexBridge {
             return;
         }
 
-        if (interaction.isButton() && interaction.customId.startsWith(STEER_BUTTON_ID)) {
+        if (interaction.isButton() && (
+            interaction.customId.startsWith(QUEUE_PROMPT_BUTTON_ID)
+            || interaction.customId.startsWith(STEER_BUTTON_ID)
+        )) {
             const id = interaction.customId.split(':').at(-1) || '';
             const pending = pendingSteers.get(id);
 
@@ -582,14 +588,16 @@ export class DiscordCodexBridge {
                 return;
             }
             pendingSteers.delete(id);
-            const queue = queuedSteers.get(pending.conversationKey) || [];
-            queue.push({
-                ...pending,
-                noticeChannelId: interaction.channelId
-            });
-            queuedSteers.set(pending.conversationKey, queue);
+            const shouldInterrupt = interaction.customId.startsWith(STEER_BUTTON_ID);
+
+            this.enqueuePrompt(pending, interaction.channelId, shouldInterrupt);
+            if (shouldInterrupt) {
+                activeRunControllers.get(pending.conversationKey)?.abort();
+            }
             await interaction.update({
-                content: 'Queued this prompt to steer the conversation after the current run.',
+                content: shouldInterrupt
+                    ? 'Interrupting the active run and steering with this prompt.'
+                    : 'Queued this prompt after the current run.',
                 components: []
             });
             return;
@@ -912,8 +920,14 @@ export class DiscordCodexBridge {
         const provider = getEffectiveProvider(settings, this.config.defaultProvider);
         const permissionMode = getEffectivePermissionMode(settings, this.config.defaultPermissionMode);
         const naturalToolPrompt = await this.createNaturalToolPrompt(message, client, request);
+        const shouldIncludeDiscordThreadContext = !isCodexThread
+            || message.attachments.size > 0
+            || Boolean(message.reference?.messageId)
+            || this.hasContextReference(request);
         const codexPrompt = this.withPromptGuidance(
-            naturalToolPrompt || withDiscordContext(request, await collectDiscordContext(message, client, request)),
+            naturalToolPrompt || withDiscordContext(request, await collectDiscordContext(message, client, request, {
+                includeCurrentChannel: shouldIncludeDiscordThreadContext
+            })),
             parseToolTags(request)
         );
 
@@ -936,8 +950,7 @@ export class DiscordCodexBridge {
             return true;
         }
 
-        const statusMessage = await this.sendThinkingMessage(message.channel as any, `Starting ${this.botName}`);
-        await this.runPrompt(statusMessage, message.channel.id, codexPrompt, {
+        const promptOptions: PromptOptions = {
             workspace: project.workspace,
             model: selectedModel,
             provider,
@@ -947,7 +960,15 @@ export class DiscordCodexBridge {
             chatName: this.getChatName(request),
             discordThreadId: message.channel.isThread() ? message.channel.id : null,
             requesterId: message.author.id
-        });
+        };
+
+        if (activeRuns.has(message.channel.id)) {
+            await this.sendSteerOffer(message, message.channel.id, codexPrompt, promptOptions);
+            return true;
+        }
+
+        const statusMessage = await this.sendThinkingMessage(message.channel as any, `Starting ${this.botName}`);
+        await this.runPrompt(statusMessage, message.channel.id, codexPrompt, promptOptions);
 
         return true;
     }
@@ -964,6 +985,8 @@ export class DiscordCodexBridge {
         }
 
         activeRuns.add(conversationKey);
+        const controller = new AbortController();
+        activeRunControllers.set(conversationKey, controller);
         const progress = this.createProgressUpdater(target);
         const runId = options.runId || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
@@ -1009,6 +1032,7 @@ export class DiscordCodexBridge {
                 fresh: options.recovering ? false : options.fresh,
                 codexThreadId: options.codexThreadId || conversation?.codexThreadId,
                 imagePaths: this.extractImagePaths(prompt),
+                signal: controller.signal,
                 onEvent: event => {
                     if (event.threadId) {
                         void updateRun(runId, { codexThreadId: event.threadId });
@@ -1054,6 +1078,13 @@ export class DiscordCodexBridge {
             const resultText = !result.ok && this.isUsageLimitText(result.error || result.text)
                 ? `Usage limit reached on the active account.\n\n${result.error || result.text}`
                 : result.ok ? result.text : `${this.botName} failed.\n\n${result.error || result.text}`;
+            if (interruptedRuns.has(conversationKey) && !result.ok) {
+                await updateRun(runId, {
+                    status: 'failed',
+                    codexThreadId: result.threadId || options.codexThreadId || conversation?.codexThreadId || null
+                });
+                return;
+            }
             if (!result.ok && this.isUsageLimitText(result.error || result.text)) {
                 await this.sendLimitResponse(target, result.error || result.text, {
                     kind: 'prompt',
@@ -1082,6 +1113,10 @@ export class DiscordCodexBridge {
             }
         } finally {
             activeRuns.delete(conversationKey);
+            if (activeRunControllers.get(conversationKey) === controller) {
+                activeRunControllers.delete(conversationKey);
+            }
+            interruptedRuns.delete(conversationKey);
             await this.runQueuedSteer(target, conversationKey);
         }
     }
@@ -1169,10 +1204,14 @@ export class DiscordCodexBridge {
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
                 .setCustomId(`${STEER_BUTTON_ID}:${id}`)
-                .setLabel('Steer with this prompt')
-                .setStyle(ButtonStyle.Primary)
+                .setLabel('Steer now')
+                .setStyle(ButtonStyle.Danger),
+            new ButtonBuilder()
+                .setCustomId(`${QUEUE_PROMPT_BUTTON_ID}:${id}`)
+                .setLabel('Queue prompt')
+                .setStyle(ButtonStyle.Secondary)
         );
-        const content = `${this.botName} is already running. Would you like to steer this conversation with that prompt when the current run finishes?`;
+        const content = `${this.botName} is already running. Steer now interrupts the active run; queue keeps this prompt next.`;
 
         if (target instanceof Message) {
             await (target.channel as any).send({ content, components: [row] });
@@ -1216,6 +1255,22 @@ export class DiscordCodexBridge {
         if (options.dangerous) return true;
 
         return /\b(full access|bypass|outside (?:the )?(?:workspace|directory)|root access|sudo|publish|deploy|production|push live)\b/i.test(prompt);
+    }
+
+    private enqueuePrompt(pending: PendingSteer, noticeChannelId: string, interrupt: boolean): void {
+        const queue = queuedSteers.get(pending.conversationKey) || [];
+        const entry = {
+            ...pending,
+            noticeChannelId
+        };
+
+        if (interrupt) {
+            queue.unshift(entry);
+            interruptedRuns.add(pending.conversationKey);
+        } else {
+            queue.push(entry);
+        }
+        queuedSteers.set(pending.conversationKey, queue);
     }
 
     private async runQueuedSteer(target: ResponseTarget, conversationKey: string): Promise<void> {

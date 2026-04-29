@@ -103,6 +103,8 @@ Mentions and normal messages in Discode-created threads continue the current con
 
 Prompts, reviews, triage, and init support tool tags. Put tags in the prompt text, for example `@browser-use` or `@computer-use`, or pass comma-separated tags through the `tools` option.
 
+When a conversation is already running, Discode offers `Steer now` to interrupt the active run or `Queue prompt` to run the new request next.
+
 ## Accounts
 
 Discode stores accounts in `data/accounts.json` unless `DISCODE_ACCOUNTS_PATH` is set. The file is local state and is ignored by git.

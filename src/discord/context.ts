@@ -15,13 +15,17 @@ interface FormatOptions {
     state: ContextState;
 }
 
-const MAX_CONTEXT_CHARS = 32000;
-const CURRENT_CHANNEL_LIMIT = 16;
-const MENTIONED_CHANNEL_LIMIT = 20;
+interface CollectContextOptions {
+    includeCurrentChannel?: boolean;
+}
+
+const MAX_CONTEXT_CHARS = 12000;
+const CURRENT_CHANNEL_LIMIT = 8;
+const MENTIONED_CHANNEL_LIMIT = 12;
 const FORUM_THREAD_LIMIT = 8;
 const FORUM_THREAD_MESSAGE_LIMIT = 5;
 const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
-const MAX_ATTACHMENT_TEXT_CHARS = 12000;
+const MAX_ATTACHMENT_TEXT_CHARS = 6000;
 const MESSAGE_LINK_PATTERN = /https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/channels\/(\d+|@me)\/(\d+)\/(\d+)/g;
 const CHANNEL_MENTION_PATTERN = /<#(\d+)>/g;
 const TEXT_EXTENSIONS = new Set([
@@ -54,7 +58,12 @@ const TEXT_EXTENSIONS = new Set([
     '.h'
 ]);
 
-export async function collectDiscordContext(source: DiscordSource, client: Client, requestText: string): Promise<string> {
+export async function collectDiscordContext(
+    source: DiscordSource,
+    client: Client,
+    requestText: string,
+    options: CollectContextOptions = {}
+): Promise<string> {
     const state: ContextState = {
         seenMessages: new Set(),
         seenChannels: new Set(),
@@ -94,7 +103,8 @@ export async function collectDiscordContext(source: DiscordSource, client: Clien
         addSection(sections, `Mentioned channel <#${channelId}>`, snapshot || 'Could not fetch this channel. Check bot permissions and channel access.');
     }
 
-    const currentChannelId = getSourceChannelId(source);
+    const shouldIncludeCurrentChannel = options.includeCurrentChannel ?? true;
+    const currentChannelId = shouldIncludeCurrentChannel ? getSourceChannelId(source) : null;
 
     if (currentChannelId) {
         const snapshot = await collectChannelSnapshot(client, currentChannelId, CURRENT_CHANNEL_LIMIT, state, false);

@@ -19,6 +19,7 @@ export interface CodexRunOptions {
     codexThreadId?: string | null;
     imagePaths?: string[];
     onEvent?: CodexEventHandler;
+    signal?: AbortSignal;
 }
 
 export interface CodexReviewOptions {
@@ -32,6 +33,7 @@ export interface CodexReviewOptions {
     instructions?: string | null;
     onEvent?: CodexEventHandler;
     requesterId?: string;
+    signal?: AbortSignal;
 }
 
 export interface CodexRunResult {
@@ -143,7 +145,7 @@ export class CodexRunner {
             : this.getExecArgs(options, outputPath);
 
         try {
-            const result = await this.spawnCodex(args, workspace, outputPath, options.onEvent);
+            const result = await this.spawnCodex(args, workspace, outputPath, options.onEvent, options.signal);
             const finalText = existsSync(outputPath) ? (await readFile(outputPath, 'utf8')).trim() : '';
             const threadId = result.threadId || extractThreadId(result.stdout);
 
@@ -197,7 +199,7 @@ export class CodexRunner {
         }
 
         try {
-            const result = await this.spawnCodex(args, workspace, outputPath, options.onEvent);
+            const result = await this.spawnCodex(args, workspace, outputPath, options.onEvent, options.signal);
             const finalText = existsSync(outputPath) ? (await readFile(outputPath, 'utf8')).trim() : '';
 
             if (result.code === 0 && finalText) {
@@ -309,7 +311,8 @@ export class CodexRunner {
         args: string[],
         workspace: string,
         outputPath: string | null,
-        onEvent?: CodexEventHandler
+        onEvent?: CodexEventHandler,
+        signal?: AbortSignal
     ): Promise<ProcessResult> {
         let stdout = '';
         let stderr = '';
@@ -334,6 +337,13 @@ export class CodexRunner {
             const timeout = setTimeout(() => {
                 child.kill('SIGTERM');
             }, this.config.runTimeoutMs);
+            const abort = () => {
+                stderr += '\nInterrupted by a newer request.';
+                child.kill('SIGTERM');
+            };
+
+            if (signal?.aborted) abort();
+            signal?.addEventListener('abort', abort, { once: true });
 
             child.stdout.on('data', chunk => {
                 const text = String(chunk);
@@ -364,11 +374,13 @@ export class CodexRunner {
             });
             child.on('error', error => {
                 clearTimeout(timeout);
+                signal?.removeEventListener('abort', abort);
                 stderr += String(error);
                 resolve(1);
             });
             child.on('close', exitCode => {
                 clearTimeout(timeout);
+                signal?.removeEventListener('abort', abort);
                 resolve(exitCode ?? 1);
             });
         });
@@ -420,6 +432,13 @@ export class CodexRunner {
             const timeout = setTimeout(() => {
                 child.kill('SIGTERM');
             }, this.config.runTimeoutMs);
+            const abort = () => {
+                stderr += '\nInterrupted by a newer request.';
+                child.kill('SIGTERM');
+            };
+
+            if (options.signal?.aborted) abort();
+            options.signal?.addEventListener('abort', abort, { once: true });
 
             child.stdout.on('data', chunk => {
                 stdout += String(chunk);
@@ -429,11 +448,13 @@ export class CodexRunner {
             });
             child.on('error', error => {
                 clearTimeout(timeout);
+                options.signal?.removeEventListener('abort', abort);
                 stderr += String(error);
                 resolve(1);
             });
             child.on('close', exitCode => {
                 clearTimeout(timeout);
+                options.signal?.removeEventListener('abort', abort);
                 resolve(exitCode ?? 1);
             });
             child.stdin.end(options.prompt || '');
