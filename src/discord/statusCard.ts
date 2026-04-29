@@ -58,11 +58,10 @@ export async function renderUsageStatsCard(usage: CodexUsage): Promise<Buffer> {
     const uncachedInput = Math.max(0, (usage.inputTokens || 0) - (usage.cachedInputTokens || 0));
     const values = [
         { label: 'Input', value: uncachedInput, color: '#10a37f' },
-        { label: 'Cached', value: usage.cachedInputTokens || 0, color: '#6e6e80' },
         { label: 'Output', value: usage.outputTokens || 0, color: '#3b82f6' },
         { label: 'Reasoning', value: usage.reasoningOutputTokens || 0, color: '#d4a72c' }
     ].filter(item => item.value > 0);
-    const total = usage.totalTokens || values.reduce((sum, item) => sum + item.value, 0);
+    const total = values.reduce((sum, item) => sum + item.value, 0);
     const slices = pieSlices(values, total, 156, 162, 78);
     const rows = values.map((item, index) => [
         `<rect x="340" y="${112 + index * 38}" width="18" height="18" rx="5" fill="${item.color}"/>`,
@@ -73,7 +72,7 @@ export async function renderUsageStatsCard(usage: CodexUsage): Promise<Buffer> {
     return sharp(Buffer.from([
         '<svg xmlns="http://www.w3.org/2000/svg" width="760" height="320" viewBox="0 0 760 320">',
         '<rect x="1" y="1" width="758" height="318" rx="28" fill="#202123" stroke="#343541" stroke-width="2"/>',
-        text('Usage', 54, 62, 32, 240, '#f7f7f8', 800),
+        text('Token Usage Stats', 54, 62, 32, 320, '#f7f7f8', 800),
         text(`${format(total)} tokens`, 650, 62, 22, 240, '#c5c5d2', 620, 'end'),
         total > 0 ? slices : '<circle cx="156" cy="162" r="78" fill="#343541"/>',
         '<circle cx="156" cy="162" r="48" fill="#202123"/>',

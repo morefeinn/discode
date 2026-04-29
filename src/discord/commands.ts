@@ -145,6 +145,9 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
             .setName('usage')
             .setDescription('Show account usage and switch accounts.'))
         .addSubcommand(subcommand => subcommand
+            .setName('stats')
+            .setDescription('Show token usage stats for this conversation.'))
+        .addSubcommand(subcommand => subcommand
             .setName('settings')
             .setDescription('Open Discode runtime and permission settings.'))
         .addSubcommand(subcommand => subcommand

@@ -6,6 +6,7 @@ import {
     getEffectiveNotifyPermissionRequired,
     getEffectiveNotifyPromptFinished,
     getEffectiveNotifyUsageLimit,
+    getEffectiveFinalResponsesAsImages,
     getEffectivePermissionMode,
     getEffectiveProvider,
     getEffectiveProviderPriority,
@@ -13,7 +14,7 @@ import {
     getEffectiveSlashResponsesEphemeral
 } from '../state/settings.js';
 
-export type SettingsPage = 'runtime' | 'access' | 'notifications';
+export type SettingsPage = 'runtime' | 'access' | 'notifications' | 'display';
 
 const WIDTH = 1100;
 const HEIGHT = 620;
@@ -32,6 +33,7 @@ function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: Setting
     const notifyPermissionRequired = getEffectiveNotifyPermissionRequired(settings);
     const notifyUsageLimit = getEffectiveNotifyUsageLimit(settings);
     const slashResponsesEphemeral = getEffectiveSlashResponsesEphemeral(settings);
+    const finalResponsesAsImages = getEffectiveFinalResponsesAsImages(settings);
     const allowedUsers = mergeAllowedUsers(config.allowedUserIds, settings.allowedUserIds || []);
     const rows = page === 'runtime'
         ? [
@@ -49,13 +51,21 @@ function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: Setting
                 row('Sandbox', permissionMode === 'auto-review' ? 'Read only' : permissionMode === 'directory' ? 'Directory scoped' : 'Full access', 406),
                 row('Workspace', config.defaultWorkspace, 486)
             ]
-            : [
+            : page === 'notifications'
+                ? [
                 row('Prompt finished', notifyPromptFinished ? 'Notify prompter' : 'Off', 166),
                 row('Permission needed', notifyPermissionRequired ? 'Notify prompter' : 'Off', 246),
                 row('Usage limits', notifyUsageLimit ? 'Notify prompter' : 'Off', 326),
                 row('Slash responses', slashResponsesEphemeral ? 'Ephemeral' : 'Public', 406),
                 row('Usage switching', config.autoSwitchOnLimit ? 'On' : 'Off', 486)
-            ];
+                ]
+                : [
+                    row('Final responses', finalResponsesAsImages ? 'Images' : 'Text', 166),
+                    row('Token stats', 'Available from response controls', 246),
+                    row('Terminal output', 'ANSI colors enabled', 326),
+                    row('Button expiry', 'Disabled after 60 seconds', 406),
+                    row('Slash responses', slashResponsesEphemeral ? 'Ephemeral' : 'Public', 486)
+                ];
 
     return [
         `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">`,
@@ -80,6 +90,7 @@ function row(labelValue: string, value: string, y: number): string {
 function pageTitle(page: SettingsPage): string {
     if (page === 'runtime') return 'Runtime';
     if (page === 'access') return 'Access';
+    if (page === 'display') return 'Display';
 
     return 'Notifications';
 }
@@ -87,6 +98,7 @@ function pageTitle(page: SettingsPage): string {
 function pageDescription(page: SettingsPage): string {
     if (page === 'runtime') return 'Provider, model, reasoning, and wrapper.';
     if (page === 'access') return 'Access, sandbox, and publishing.';
+    if (page === 'display') return 'Cards, response format, and interactive controls.';
 
     return 'Privacy, pings, failover, and Discord scope.';
 }

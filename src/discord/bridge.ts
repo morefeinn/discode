@@ -49,6 +49,7 @@ import {
     getEffectiveNotifyPermissionRequired,
     getEffectiveNotifyPromptFinished,
     getEffectiveNotifyUsageLimit,
+    getEffectiveFinalResponsesAsImages,
     getEffectiveModel,
     getEffectivePermissionMode,
     getEffectiveProvider,
@@ -66,6 +67,7 @@ import {
     ReasoningEffort
 } from '../state/settings.js';
 import { listRunningRuns, saveRun, updateRun, RunRecord } from '../state/runs.js';
+import { getTokenStats, recordTokenUsage } from '../state/tokenStats.js';
 import { getTranscript } from '../state/transcript.js';
 import { recordUsageLimit } from '../state/usage.js';
 import {
@@ -76,6 +78,7 @@ import {
 } from '../update/checker.js';
 import { renderChatCard } from './chatCard.js';
 import { collectDiscordContext, collectTargetChannelContext, withDiscordContext } from './context.js';
+import { renderFinalResponseCards } from './finalResponseCard.js';
 import { createInitPrompt } from './initPrompt.js';
 import { renderMcpCard } from './mcpCard.js';
 import { renderAccessRequestCard, renderLimitCard, renderThinkingGif, renderUsageStatsCard } from './statusCard.js';
@@ -84,7 +87,7 @@ import { renderTerminalCard } from './terminalCard.js';
 import { runTerminalCommand } from './terminal.js';
 import { sanitizeDiscordText, splitDiscordText } from './text.js';
 import { parseToolTags, withToolTagGuidance } from './toolTags.js';
-import { renderUsageCard, UsageCardData, UsageCardWindow } from './usageCard.js';
+import { renderUsageCard, renderUsageOverviewCard, UsageCardData, UsageCardWindow, UsageOverviewData } from './usageCard.js';
 import { renderWorkspaceCard, WorkspaceCardGit } from './workspaceCard.js';
 
 type ResponseTarget = Message | ChatInputCommandInteraction;
@@ -125,6 +128,8 @@ const queuedSteers = new Map<string, QueuedSteer[]>();
 const pendingAccessRequests = new Map<string, PendingAccess>();
 const pendingLimitRetries = new Map<string, PendingLimit>();
 const componentMessageActivity = new Map<string, number>();
+const componentMessages = new Map<string, Message>();
+const latestComponentMessageByChannel = new Map<string, string>();
 const ATTACHMENT_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.txt', '.log', '.json', '.md']);
 const MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
 const MODEL_BUTTON_ID = 'codex:model-panel';
@@ -142,6 +147,8 @@ const ACCESS_USERS_BUTTON_ID = 'codex:settings-access-users';
 const ACCESS_USERS_MODAL_ID = 'codex:settings-access-users-modal';
 const SETTINGS_PAGE_SELECT_ID = 'codex:settings-page';
 const SETTINGS_BUTTON_ID = 'codex:settings-panel';
+const TOKEN_STATS_BUTTON_ID = 'codex:token-stats';
+const FINAL_RESPONSE_SELECT_ID = 'codex:set-final-response';
 const ACCESS_APPROVE_ID = 'codex:approve-access';
 const CONVERSATION_SELECT_ID = 'codex:load-conversation';
 const CHAT_LINK_SELECT_ID = 'codex:chat-link';
@@ -209,7 +216,7 @@ const permissionChoices: { label: string; value: PermissionMode; description: st
     { label: 'Directory Only', value: 'directory', description: 'Ask before elevated access.' },
     { label: 'Auto-Review', value: 'auto-review', description: 'Run read-only by default.' }
 ];
-const settingsPages: SettingsPage[] = ['runtime', 'access', 'notifications'];
+const settingsPages: SettingsPage[] = ['runtime', 'access', 'notifications', 'display'];
 const idleProgressLabels = [
     'Thinking through the next step',
     'Checking the shape of the task',
@@ -469,6 +476,11 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (subcommand === 'stats') {
+            await this.showTokenStats(interaction, interaction.channelId);
+            return;
+        }
+
         if (subcommand === 'settings') {
             await this.showSettingsDashboard(interaction);
             return;
@@ -543,8 +555,18 @@ export class DiscordCodexBridge {
 
         if (await this.expireInactiveComponent(interaction)) return;
 
-        if (interaction.isButton() && (interaction.customId === MODEL_BUTTON_ID || interaction.customId === REASONING_BUTTON_ID)) {
-            await this.showSettingsDashboard(interaction, 'runtime');
+        if (interaction.isButton() && interaction.customId === MODEL_BUTTON_ID) {
+            await this.showModelPicker(interaction);
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId === REASONING_BUTTON_ID) {
+            await this.showReasoningPicker(interaction);
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId === TOKEN_STATS_BUTTON_ID) {
+            await this.showTokenStats(interaction, interaction.channelId);
             return;
         }
 
@@ -669,7 +691,13 @@ export class DiscordCodexBridge {
 
         if (interaction.isStringSelectMenu() && interaction.customId === SLASH_PRIVACY_SELECT_ID) {
             await updateBridgeSettings({ slashResponsesEphemeral: interaction.values[0] === 'ephemeral' });
-            await this.updateSettingsDashboard(interaction, 'notifications');
+            await this.updateSettingsDashboard(interaction, 'display');
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId === FINAL_RESPONSE_SELECT_ID) {
+            await updateBridgeSettings({ finalResponsesAsImages: interaction.values[0] === 'images' });
+            await this.updateSettingsDashboard(interaction, 'display');
             return;
         }
 
@@ -692,6 +720,7 @@ export class DiscordCodexBridge {
                 components: dashboard.components,
                 files: dashboard.files
             });
+            this.scheduleComponentExpiry(interaction.message, dashboard.components.length > 0);
             return;
         }
 
@@ -749,7 +778,7 @@ export class DiscordCodexBridge {
         if (interaction.isStringSelectMenu() && interaction.customId.startsWith(ACCOUNT_SELECT_ID)) {
             await interaction.deferUpdate();
             const sessionId = interaction.customId.split(':').at(-1) || '';
-            const page = Math.max(0, Number(interaction.values[0]) - 1);
+            const page = Math.max(0, Number(interaction.values[0]));
             const dashboard = this.createUsageDashboardView(sessionId, page) || await this.createUsageDashboard(page);
 
             await interaction.editReply({
@@ -759,6 +788,7 @@ export class DiscordCodexBridge {
                 components: dashboard.components,
                 files: dashboard.files
             });
+            this.scheduleComponentExpiry(interaction.message, dashboard.components.length > 0);
             return;
         }
 
@@ -766,7 +796,7 @@ export class DiscordCodexBridge {
             await interaction.deferUpdate();
             const page = Math.max(1, Number(interaction.customId.split(':').at(-1)) || 1);
             const account = await this.accounts.switchTo(String(page));
-            const dashboard = await this.createUsageDashboard(page - 1);
+            const dashboard = await this.createUsageDashboard(page);
 
             await interaction.editReply({
                 content: `Using ${account.name}.`,
@@ -775,6 +805,7 @@ export class DiscordCodexBridge {
                 components: dashboard.components,
                 files: dashboard.files
             });
+            this.scheduleComponentExpiry(interaction.message, dashboard.components.length > 0);
             return;
         }
 
@@ -825,6 +856,7 @@ export class DiscordCodexBridge {
                 components: dashboard.components,
                 files: dashboard.files
             });
+            this.scheduleComponentExpiry(interaction.message, dashboard.components.length > 0);
         }
     }
 
@@ -1085,6 +1117,9 @@ export class DiscordCodexBridge {
                     resetAt: this.extractResetTime(result.limitError)
                 });
             }
+            if (result.usage) {
+                await recordTokenUsage(conversationKey, result.usage).catch(error => console.warn('Failed to record token stats:', error));
+            }
             if (!result.ok && this.isUsageLimitText(result.error || result.text)) {
                 await this.recordCurrentUsageLimit(result.error || result.text);
             }
@@ -1173,6 +1208,10 @@ export class DiscordCodexBridge {
                     resetAt: this.extractResetTime(result.limitError)
                 });
             }
+            if (result.usage) {
+                await recordTokenUsage(conversationKey, result.usage).catch(error => console.warn('Failed to record token stats:', error));
+                await recordTokenUsage(target.channelId, result.usage).catch(error => console.warn('Failed to record token stats:', error));
+            }
             if (!result.ok && this.isUsageLimitText(result.error || result.text)) {
                 await this.recordCurrentUsageLimit(result.error || result.text);
             }
@@ -1231,11 +1270,13 @@ export class DiscordCodexBridge {
         const content = `${this.botName} is already running. Steer now interrupts the active run; queue keeps this prompt next.`;
 
         if (target instanceof Message) {
-            await (target.channel as any).send({ content, components: [row] });
+            const message = await (target.channel as any).send({ content, components: [row] });
+            this.scheduleComponentExpiry(message, true);
             return;
         }
 
-        await target.editReply({ content, components: [row] });
+        const message = await target.editReply({ content, components: [row] });
+        this.scheduleComponentExpiry(message as Message, true);
     }
 
     private async sendAccessRequest(target: ResponseTarget, conversationKey: string, prompt: string, options: PromptOptions): Promise<void> {
@@ -1258,13 +1299,15 @@ export class DiscordCodexBridge {
         };
 
         if (target instanceof Message) {
-            await target.edit(payload).catch(async () => {
-                await (target.channel as any).send(payload);
+            const message = await target.edit(payload).catch(async () => {
+                return (target.channel as any).send(payload);
             });
+            this.scheduleComponentExpiry((message || target) as Message, true);
             return;
         }
 
-        await target.editReply(payload);
+        const message = await target.editReply(payload);
+        this.scheduleComponentExpiry(message as Message, true);
     }
 
     private needsAccessApproval(prompt: string, options: PromptOptions): boolean {
@@ -1359,12 +1402,17 @@ export class DiscordCodexBridge {
         };
 
         if (target instanceof Message) {
-            return target.edit(payload).catch(async () => {
+            const message = await target.edit(payload).catch(async () => {
                 return (target.channel as any).send(payload);
             });
+            this.scheduleComponentExpiry(message as Message, components.length > 0);
+            return message as Message;
         }
 
-        return target.editReply(payload);
+        const messageResult = await target.editReply(payload);
+        this.scheduleComponentExpiry(messageResult as Message, components.length > 0);
+
+        return messageResult as Message;
     }
 
     private async runPendingLimitRetry(interaction: ComponentInteraction, retryId: string, overrides: Partial<PromptOptions>): Promise<void> {
@@ -1470,6 +1518,7 @@ export class DiscordCodexBridge {
             components: [row],
             ...(await this.getSlashReplyOptions())
         });
+        this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, true);
     }
 
     private async showChatsDashboard(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1502,6 +1551,7 @@ export class DiscordCodexBridge {
             components,
             files: [new AttachmentBuilder(image, { name: 'codex-chats.png' })]
         });
+        this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, components.length > 0);
     }
 
     private async archiveCurrentThread(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1526,6 +1576,7 @@ export class DiscordCodexBridge {
             components: dashboard.components,
             files: dashboard.files
         });
+        this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, dashboard.components.length > 0);
     }
 
     private async getSlashReplyOptions(): Promise<{ flags?: 64 }> {
@@ -1548,10 +1599,106 @@ export class DiscordCodexBridge {
 
         if (interaction instanceof ChatInputCommandInteraction) {
             await interaction.reply(payload);
+            this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, payload.components.length > 0);
             return;
         }
 
         await interaction.reply(payload);
+        this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, payload.components.length > 0);
+    }
+
+    private async showModelPicker(interaction: ButtonInteraction): Promise<void> {
+        const settings = await getBridgeSettings();
+        const model = getEffectiveModel(settings, this.config.defaultModel);
+        const modelOptions = listModelChoices().map(choice => ({
+            label: choice.name.slice(0, 100),
+            value: choice.value,
+            default: choice.value === DEFAULT_MODEL_CHOICE ? !settings.model : choice.value === model
+        }));
+
+        if (settings.model && !modelOptions.some(option => option.value === model)) {
+            modelOptions.unshift({
+                label: model.slice(0, 100),
+                value: model,
+                default: true
+            });
+        }
+
+        await interaction.reply({
+            content: '',
+            components: [
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(MODEL_SELECT_ID)
+                        .setPlaceholder(`Model: ${model}`)
+                        .addOptions(modelOptions.slice(0, 25))
+                )
+            ],
+            flags: MessageFlags.Ephemeral
+        });
+        this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, true);
+    }
+
+    private async showReasoningPicker(interaction: ButtonInteraction): Promise<void> {
+        const settings = await getBridgeSettings();
+        const reasoning = getEffectiveReasoning(settings);
+
+        await interaction.reply({
+            content: '',
+            components: [
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(REASONING_SELECT_ID)
+                        .setPlaceholder(`Reasoning: ${this.formatReasoning(reasoning)}`)
+                        .addOptions(reasoningChoices.map(choice => ({
+                            label: choice.label,
+                            value: choice.value,
+                            description: choice.description,
+                            default: choice.value === reasoning
+                        })))
+                )
+            ],
+            flags: MessageFlags.Ephemeral
+        });
+        this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, true);
+    }
+
+    private async showTokenStats(interaction: ChatInputCommandInteraction | ButtonInteraction, conversationKey: string): Promise<void> {
+        const stats = await getTokenStats(conversationKey);
+
+        if (!stats) {
+            if (interaction instanceof ChatInputCommandInteraction) {
+                await interaction.reply({
+                    content: 'No token usage stats are stored for this conversation yet.',
+                    ...(await this.getSlashReplyOptions())
+                });
+            } else {
+                await interaction.reply({
+                    content: 'No token usage stats are stored for this conversation yet.',
+                    flags: 64
+                });
+            }
+            return;
+        }
+
+        const file = new AttachmentBuilder(await renderUsageStatsCard(stats), { name: 'token-usage-stats.png' });
+
+        if (interaction instanceof ChatInputCommandInteraction) {
+            await interaction.reply({
+                content: '',
+                embeds: [],
+                files: [file],
+                ...(await this.getSlashReplyOptions())
+            });
+            return;
+        }
+
+        await interaction.reply({
+            content: '',
+            embeds: [],
+            files: [file],
+            flags: 64
+        });
     }
 
     private async showWorkspaceDashboard(interaction: ChatInputCommandInteraction | ModalSubmitInteraction): Promise<void> {
@@ -1564,6 +1711,7 @@ export class DiscordCodexBridge {
             files: dashboard.files,
             ...(await this.getSlashReplyOptions())
         });
+        this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, dashboard.components.length > 0);
     }
 
     private async showTerminalDashboard(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1593,6 +1741,7 @@ export class DiscordCodexBridge {
             files: [new AttachmentBuilder(image, { name: `${this.commandName}-terminal.png` })],
             ...(await this.getSlashReplyOptions())
         });
+        this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, true);
     }
 
     private async showMcpDashboard(interaction: ChatInputCommandInteraction | ModalSubmitInteraction): Promise<void> {
@@ -1612,6 +1761,7 @@ export class DiscordCodexBridge {
             files: [new AttachmentBuilder(image, { name: `${this.commandName}-mcps.png` })],
             ...(await this.getSlashReplyOptions())
         });
+        this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, true);
     }
 
     private async createWorkspaceDashboard(): Promise<DashboardView> {
@@ -1678,6 +1828,7 @@ export class DiscordCodexBridge {
             components: await this.createSettingsRows(page),
             files: [new AttachmentBuilder(image, { name: `discode-settings-${page}.png` })]
         });
+        this.scheduleComponentExpiry(interaction.message, true);
     }
 
     private async createUsageDashboard(page = 0): Promise<UsageDashboardView> {
@@ -1686,14 +1837,17 @@ export class DiscordCodexBridge {
         const rawState = await this.accounts.readState();
         const rawAccounts = rawState?.accounts || [];
         const usages = new Map<string, AccountUsage>();
-        const pageCount = Math.max(1, accounts.length);
         const sessionId = this.createUsageSessionId();
 
         await Promise.all(rawAccounts.map(async account => {
             usages.set(account.id, await fetchAccountUsage(account));
         }));
 
-        const pages = await Promise.all(Array.from({ length: pageCount }, (_, index) => renderUsageCard(this.createUsageCardData(accounts, usages, index))));
+        const accountPages = await Promise.all(accounts.map((_account, index) => renderUsageCard(this.createUsageCardData(accounts, usages, index))));
+        const pages = [
+            await renderUsageOverviewCard(this.createUsageOverviewData(accounts, usages)),
+            ...accountPages
+        ];
 
         usageDashboardSessions.set(sessionId, {
             id: sessionId,
@@ -1722,6 +1876,37 @@ export class DiscordCodexBridge {
         };
     }
 
+    private createUsageOverviewData(accounts: AccountSummary[], usages: Map<string, AccountUsage>): UsageOverviewData {
+        const providers = new Map<string, { total: number; count: number }>();
+
+        for (const account of accounts) {
+            const remaining = this.getWeeklyRemaining(usages.get(account.id));
+            const entry = providers.get(account.provider) || { total: 0, count: 0 };
+
+            if (remaining !== null) {
+                entry.total += remaining;
+                entry.count += 1;
+            }
+            providers.set(account.provider, entry);
+        }
+
+        return {
+            title: `${this.botName} Usage Limits`,
+            accounts: accounts.map(account => ({
+                name: this.getAccountAlias(account),
+                provider: account.provider,
+                active: account.active,
+                remainingPercent: this.getWeeklyRemaining(usages.get(account.id))
+            })),
+            providers: [...providers].map(([name, value]) => ({
+                name: this.capitalize(name),
+                accountCount: accounts.filter(account => account.provider === name).length,
+                remainingPercent: value.count > 0 ? value.total / value.count : null
+            })),
+            generatedAt: new Date().toLocaleString()
+        };
+    }
+
     private createUsageCardData(accounts: AccountSummary[], usages: Map<string, AccountUsage>, page: number): UsageCardData {
         const pageCount = Math.max(1, accounts.length);
         const normalizedPage = Math.min(Math.max(page, 0), pageCount - 1);
@@ -1745,9 +1930,9 @@ export class DiscordCodexBridge {
     }
 
     private createUsageRows(page: number, sessionId: string, accounts: AccountSummary[]): ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] {
-        if (accounts.length === 0) return [];
-        const pageCount = Math.max(1, accounts.length);
+        const pageCount = Math.max(1, accounts.length + 1);
         const normalizedPage = Math.min(Math.max(page, 0), pageCount - 1);
+        const account = normalizedPage > 0 ? accounts[normalizedPage - 1] : null;
         const rows: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] = [
             new ActionRowBuilder<ButtonBuilder>().addComponents(
                 new ButtonBuilder()
@@ -1756,10 +1941,10 @@ export class DiscordCodexBridge {
                     .setStyle(ButtonStyle.Secondary)
                     .setDisabled(normalizedPage === 0),
                 new ButtonBuilder()
-                    .setCustomId(`${USAGE_ACTIVATE_ACCOUNT_ID}:${normalizedPage + 1}`)
-                    .setLabel(accounts[normalizedPage]?.active ? 'Active account' : 'Use this account')
-                    .setStyle(accounts[normalizedPage]?.active ? ButtonStyle.Success : ButtonStyle.Primary)
-                    .setDisabled(accounts[normalizedPage]?.active === true),
+                    .setCustomId(`${USAGE_ACTIVATE_ACCOUNT_ID}:${normalizedPage}`)
+                    .setLabel(account ? account.active ? 'Active account' : 'Use this account' : 'Overview')
+                    .setStyle(account?.active ? ButtonStyle.Success : ButtonStyle.Primary)
+                    .setDisabled(!account || account.active === true),
                 new ButtonBuilder()
                     .setCustomId(`${USAGE_NEXT_ID}:${sessionId}:${Math.min(pageCount - 1, normalizedPage + 1)}`)
                     .setLabel('Next')
@@ -1769,13 +1954,21 @@ export class DiscordCodexBridge {
             new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
                 new StringSelectMenuBuilder()
                     .setCustomId(`${ACCOUNT_SELECT_ID}:${sessionId}`)
-                    .setPlaceholder('Switch account')
-                    .addOptions(accounts.slice(0, 25).map(account => ({
-                        label: this.getAccountAlias(account).slice(0, 100),
-                        value: String(account.index),
-                        description: `Plan ${this.capitalize(account.planType)}`.slice(0, 100),
-                        default: account.index === normalizedPage + 1
-                    })))
+                    .setPlaceholder('Usage page')
+                    .addOptions([
+                        {
+                            label: 'Overview',
+                            value: '0',
+                            description: 'All providers and account usage limits.',
+                            default: normalizedPage === 0
+                        },
+                        ...accounts.slice(0, 24).map((account, index) => ({
+                            label: this.getAccountAlias(account).slice(0, 100),
+                            value: String(index + 1),
+                            description: `Plan ${this.capitalize(account.planType)}`.slice(0, 100),
+                            default: normalizedPage === index + 1
+                        }))
+                    ])
             )
         ];
 
@@ -1802,6 +1995,14 @@ export class DiscordCodexBridge {
             duration: window?.windowSeconds ? this.formatDuration(window.windowSeconds) : 'Unknown window',
             reset: window?.resetAt ? this.formatDate(window.resetAt) : 'unknown'
         };
+    }
+
+    private getWeeklyRemaining(usage: AccountUsage | undefined): number | null {
+        const used = usage?.secondaryWindow?.usedPercent ?? usage?.primaryWindow?.usedPercent;
+
+        if (used === undefined || used === null) return null;
+
+        return Math.max(0, Math.min(100, 100 - used));
     }
 
     private formatDuration(seconds: number): string {
@@ -1857,17 +2058,45 @@ export class DiscordCodexBridge {
     }
 
     private async sendPages(target: ResponseTarget, text: string, result?: CodexRunResult): Promise<Message | null> {
-        const pages = splitDiscordText(sanitizeDiscordText(this.formatDiscordOutput(text || `${this.botName} completed with no final message.`)));
+        const formatted = sanitizeDiscordText(this.formatDiscordOutput(text || `${this.botName} completed with no final message.`));
+        const pages = splitDiscordText(formatted);
         const files = this.getResultAttachments(result?.text || text);
-        if (result?.usage) {
-            files.push(new AttachmentBuilder(await renderUsageStatsCard(result.usage), { name: 'codex-usage-stats.png' }));
-        }
         const components = result ? await this.createRunControls() : [];
+        const settings = await getBridgeSettings();
+        const responseImages = Boolean(result) && getEffectiveFinalResponsesAsImages(settings);
+
+        if (responseImages) {
+            const responseCards = await renderFinalResponseCards(formatted, this.botName);
+            const cardFiles = responseCards.map((card, index) => new AttachmentBuilder(card, { name: `discode-response-${index + 1}.png` }));
+            const firstFiles = [...cardFiles.slice(0, 1), ...files].slice(0, 10);
+
+            if (target instanceof Message) {
+                let latest = await target.edit({ content: '', attachments: [], files: firstFiles, components }).catch(async () => {
+                    return (target.channel as any).send({ content: '', files: firstFiles, components });
+                });
+                this.scheduleComponentExpiry(latest, components.length > 0, true);
+
+                for (const card of cardFiles.slice(1)) {
+                    latest = await (target.channel as any).send({ content: '', files: [card] });
+                }
+                return latest || null;
+            }
+
+            let latest = await target.editReply({ content: '', attachments: [], files: firstFiles, components });
+            this.scheduleComponentExpiry(latest as Message, components.length > 0, true);
+
+            for (const card of cardFiles.slice(1)) {
+                latest = await target.followUp({ content: '', files: [card] });
+            }
+
+            return latest as Message || null;
+        }
 
         if (target instanceof Message) {
             let latest = await target.edit({ content: pages[0], attachments: [], files: files.slice(0, 10), components }).catch(async () => {
                 return (target.channel as any).send({ content: pages[0], files: files.slice(0, 10), components });
             });
+            this.scheduleComponentExpiry(latest, components.length > 0, true);
 
             for (const page of pages.slice(1)) {
                 latest = await (target.channel as any).send(page);
@@ -1876,6 +2105,7 @@ export class DiscordCodexBridge {
         }
 
         let latest = await target.editReply({ content: pages[0], attachments: [], files: files.slice(0, 10), components });
+        this.scheduleComponentExpiry(latest as Message, components.length > 0, true);
 
         for (const page of pages.slice(1)) {
             latest = await target.followUp(page);
@@ -1990,6 +2220,10 @@ export class DiscordCodexBridge {
                     .setLabel(`Reasoning: ${this.formatReasoning(reasoning)}`)
                     .setStyle(ButtonStyle.Secondary),
                 new ButtonBuilder()
+                    .setCustomId(TOKEN_STATS_BUTTON_ID)
+                    .setLabel('Token Usage Stats')
+                    .setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
                     .setCustomId(SETTINGS_BUTTON_ID)
                     .setLabel('Settings')
                     .setStyle(ButtonStyle.Secondary)
@@ -2008,6 +2242,7 @@ export class DiscordCodexBridge {
         const notifyPermissionRequired = getEffectiveNotifyPermissionRequired(settings);
         const notifyUsageLimit = getEffectiveNotifyUsageLimit(settings);
         const slashResponsesEphemeral = getEffectiveSlashResponsesEphemeral(settings);
+        const finalResponsesAsImages = getEffectiveFinalResponsesAsImages(settings);
         const modelOptions = listModelChoices().map(choice => ({
             label: choice.name.slice(0, 100),
             value: choice.value,
@@ -2090,6 +2325,21 @@ export class DiscordCodexBridge {
                         .addOptions([
                             { label: 'On', value: 'on', description: 'Notify the prompter when a provider hits limits.', default: notifyUsageLimit },
                             { label: 'Off', value: 'off', description: 'Do not notify for usage limits.', default: !notifyUsageLimit }
+                        ])
+                )
+            ];
+        }
+
+        if (page === 'display') {
+            return [
+                pageRow,
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(FINAL_RESPONSE_SELECT_ID)
+                        .setPlaceholder(`Final responses: ${finalResponsesAsImages ? 'Images' : 'Text'}`)
+                        .addOptions([
+                            { label: 'Images', value: 'images', description: 'Render final agent replies as clean image cards.', default: finalResponsesAsImages },
+                            { label: 'Text', value: 'text', description: 'Send final agent replies as Discord text.', default: !finalResponsesAsImages }
                         ])
                 ),
                 new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
@@ -2466,9 +2716,14 @@ export class DiscordCodexBridge {
 
         if (Date.now() - lastActive <= COMPONENT_IDLE_TTL_MS) {
             componentMessageActivity.set(messageId, Date.now());
+            this.scheduleComponentExpiry(interaction.message, true);
             return false;
         }
         componentMessageActivity.delete(messageId);
+        componentMessages.delete(messageId);
+        if (latestComponentMessageByChannel.get(interaction.message.channelId) === messageId) {
+            latestComponentMessageByChannel.delete(interaction.message.channelId);
+        }
         pendingLimitRetries.forEach((pending, id) => {
             if (pending.expiresAt < Date.now()) pendingLimitRetries.delete(id);
         });
@@ -2476,7 +2731,7 @@ export class DiscordCodexBridge {
             content: 'This interaction expired after 60 seconds of inactivity.',
             flags: MessageFlags.Ephemeral
         }).catch(() => undefined);
-        await interaction.message.edit({ components: [] }).catch(() => undefined);
+        await this.disableMessageComponents(interaction.message);
 
         return true;
     }
@@ -2487,8 +2742,53 @@ export class DiscordCodexBridge {
         for (const [messageId, lastActive] of componentMessageActivity) {
             if (now - lastActive > COMPONENT_IDLE_TTL_MS) {
                 componentMessageActivity.delete(messageId);
+                componentMessages.delete(messageId);
             }
         }
+    }
+
+    private scheduleComponentExpiry(message: Message | null | undefined, hasComponents = true, replacePrevious = false): void {
+        if (!message || !hasComponents) return;
+        const previousId = latestComponentMessageByChannel.get(message.channelId);
+
+        if (replacePrevious && previousId && previousId !== message.id) {
+            const previous = componentMessages.get(previousId);
+
+            if (previous) void this.disableMessageComponents(previous);
+        }
+        componentMessages.set(message.id, message);
+        if (replacePrevious || !previousId) {
+            latestComponentMessageByChannel.set(message.channelId, message.id);
+        }
+        componentMessageActivity.set(message.id, Date.now());
+        setTimeout(() => {
+            const lastActive = componentMessageActivity.get(message.id);
+
+            if (!lastActive || Date.now() - lastActive < COMPONENT_IDLE_TTL_MS) return;
+            componentMessageActivity.delete(message.id);
+            componentMessages.delete(message.id);
+            if (latestComponentMessageByChannel.get(message.channelId) === message.id) {
+                latestComponentMessageByChannel.delete(message.channelId);
+            }
+            void this.disableMessageComponents(message);
+        }, COMPONENT_IDLE_TTL_MS + 250);
+    }
+
+    private async disableMessageComponents(message: Message): Promise<void> {
+        const components = message.components.map(row => {
+            const json = row.toJSON() as any;
+
+            return {
+                ...json,
+                components: (json.components || []).map((component: any) => ({
+                    ...component,
+                    disabled: true
+                }))
+            };
+        });
+
+        if (components.length === 0) return;
+        await message.edit({ components }).catch(() => undefined);
     }
 
     private async resolveProject(workspace?: string, model?: string): Promise<{ workspace: string; model?: string | null }> {

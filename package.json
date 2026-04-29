@@ -1,6 +1,6 @@
 {
   "name": "discode",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Discord-native agent interface for local coding tools, model providers, and project workspaces.",
   "license": "MIT",
   "type": "module",
