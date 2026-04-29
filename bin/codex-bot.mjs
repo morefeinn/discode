@@ -95,8 +95,8 @@ function loadEnvFile() {
 
 function getRuntimeEnv() {
     return {
-        ...process.env,
-        ...loadEnvFile()
+        ...loadEnvFile(),
+        ...process.env
     };
 }
 
@@ -496,7 +496,13 @@ function normalizeAccountState(state) {
 }
 
 function normalizeProvider(provider) {
-    return provider === 'opencode' || provider === 'custom' ? provider : 'codex';
+    return provider === 'opencode'
+        || provider === 'anthropic'
+        || provider === 'zai'
+        || provider === 'qwen'
+        || provider === 'custom'
+        ? provider
+        : 'codex';
 }
 
 function accountName(account, index) {
@@ -518,6 +524,87 @@ function accounts() {
         const marker = account.id === state.active_account_id ? '*' : '-';
         console.log(`${marker} ${index + 1}. ${accountName(account, index)} ${normalizeProvider(account.provider)} ${account.plan_type || account.auth_mode || 'unknown'}`);
     }
+}
+
+async function addAccount() {
+    const state = readAccountState();
+    const headless = hasFlag('headless') || hasFlag('yes') || hasFlag('ci');
+    const providerFlag = flagValue('provider');
+    const rl = createPrompter();
+
+    try {
+        const selectedProvider = providerFlag
+            ? normalizeProvider(providerFlag)
+            : normalizeProvider(headless ? 'codex' : await promptValue(rl, 'Provider codex/opencode/anthropic/zai/qwen/custom', '', 'codex', true));
+        const name = await setupValue(rl, { label: 'Account name', flag: 'name', current: '', fallback: `${providerLabel(selectedProvider)} ${state.accounts.length + 1}`, headless });
+        const email = await setupValue(rl, { label: 'Email or label', flag: 'email', current: '', headless });
+        const priority = Number(await setupValue(rl, { label: 'Priority', flag: 'priority', current: '', fallback: String(state.accounts.length + 1), headless }));
+        const command = await setupValue(rl, { label: 'Command override', flag: 'command', current: '', headless });
+        const apiKey = await setupValue(rl, {
+            label: `${defaultApiKeyName(selectedProvider)} or leave empty if the provider CLI is already logged in`,
+            flag: 'api-key',
+            current: '',
+            headless
+        });
+        const account = {
+            id: uniqueAccountId(state, name || selectedProvider),
+            name,
+            provider: selectedProvider,
+            email: email || undefined,
+            plan_type: apiKey ? 'api_key' : 'login',
+            auth_mode: apiKey ? 'api_key' : 'login',
+            auth_data: apiKey ? {
+                api_key: apiKey,
+                env_key: defaultApiKeyName(selectedProvider)
+            } : {
+                type: 'login'
+            },
+            command: command || undefined,
+            priority: Number.isFinite(priority) ? priority : state.accounts.length + 1,
+            last_used_at: new Date().toISOString()
+        };
+
+        state.accounts.push(account);
+        state.active_account_id = account.id;
+        writeAccountState(state);
+        console.log(`Added and activated ${account.name}.`);
+    } finally {
+        rl.close();
+    }
+}
+
+function uniqueAccountId(state, value) {
+    const base = String(value || 'account')
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 48) || 'account';
+    let id = base;
+    let suffix = 2;
+
+    while (state.accounts.some(account => account.id === id)) {
+        id = `${base}-${suffix}`;
+        suffix += 1;
+    }
+
+    return id;
+}
+
+function providerLabel(provider) {
+    if (provider === 'anthropic') return 'Anthropic';
+    if (provider === 'zai') return 'Z.ai';
+    if (provider === 'qwen') return 'Qwen';
+    if (provider === 'opencode') return 'OpenCode';
+
+    return 'Codex';
+}
+
+function defaultApiKeyName(provider) {
+    if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
+    if (provider === 'zai') return 'ZAI_API_KEY';
+    if (provider === 'qwen') return 'QWEN_API_KEY';
+
+    return 'OPENAI_API_KEY';
 }
 
 function findAccount(state, query) {
@@ -647,6 +734,7 @@ function help() {
   discode status             Show background status
   discode logs               Show recent background logs
   discode accounts           List Discode accounts
+  discode accounts add       Add a Codex, Anthropic, OpenCode, Z.ai, Qwen, or custom account
   discode switch <account>   Switch account by index, id, name, or next
 
   codex-bot still works as a compatibility alias.`);
@@ -681,7 +769,12 @@ try {
     } else if (command === 'version') {
         console.log(packageJson.version);
     } else if (command === 'accounts') {
-        accounts();
+        if (args[0] === 'add') {
+            args.shift();
+            await addAccount();
+        } else {
+            accounts();
+        }
     } else if (command === 'switch') {
         switchAccount(args.join(' '));
     } else {

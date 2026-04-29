@@ -199,6 +199,7 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
             .setDescription(`Use ${displayName} bypass mode for this run.`));
     const rest = new REST({ version: '10' }).setToken(config.token);
     const guildId = process.env.DISCORD_GUILD_ID?.trim();
+    const registerGuildCommands = ['1', 'true', 'yes', 'on'].includes((process.env.DISCODE_REGISTER_GUILD_COMMANDS || '').toLowerCase());
     const body = commandName === 'init' ? [command.toJSON()] : [command.toJSON(), initCommand.toJSON()];
     const commandNames = body.map(item => `/${item.name}`);
     const globalBody = body.map(item => ({
@@ -231,10 +232,12 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
         await rest.put(Routes.applicationCommands(config.clientId), { body: botInstallBody });
     }
 
-    const guildIds = Array.from(new Set([guildId, ...connectedGuildIds].filter((value): value is string => Boolean(value))));
+    const guildIds = registerGuildCommands
+        ? Array.from(new Set([guildId, ...connectedGuildIds].filter((value): value is string => Boolean(value))))
+        : Array.from(new Set([guildId, ...connectedGuildIds].filter((value): value is string => Boolean(value))));
 
     for (const guildId of guildIds) {
-        await rest.put(Routes.applicationGuildCommands(config.clientId, guildId), { body });
+        await rest.put(Routes.applicationGuildCommands(config.clientId, guildId), { body: registerGuildCommands ? body : [] });
     }
 
     return {

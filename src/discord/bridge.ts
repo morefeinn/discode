@@ -50,6 +50,7 @@ import {
     getEffectiveNotifyPromptFinished,
     getEffectiveNotifyUsageLimit,
     getEffectiveFinalResponsesAsImages,
+    getEffectiveAutoSwitchOnLimit,
     getEffectiveModel,
     getEffectivePermissionMode,
     getEffectiveProvider,
@@ -66,6 +67,7 @@ import {
     ProviderType,
     ReasoningEffort
 } from '../state/settings.js';
+import { listAvailableModels, ModelChoiceMetadata } from '../models/catalog.js';
 import { listRunningRuns, saveRun, updateRun, RunRecord } from '../state/runs.js';
 import { getTokenStats, recordTokenUsage } from '../state/tokenStats.js';
 import { getTranscript } from '../state/transcript.js';
@@ -94,6 +96,7 @@ type ResponseTarget = Message | ChatInputCommandInteraction;
 type ComponentInteraction = ButtonInteraction | StringSelectMenuInteraction;
 type UsageDashboardView = { components: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[]; files: AttachmentBuilder[] };
 type UsageDashboardSession = { id: string; createdAt: number; accounts: AccountSummary[]; pages: Buffer[] };
+type ModelPickerSession = { id: string; createdAt: number; provider: ProviderType; pages: ModelChoiceMetadata[][] };
 type PromptOptions = {
     fresh?: boolean;
     workspace?: string;
@@ -123,6 +126,7 @@ const activeRuns = new Set<string>();
 const activeRunControllers = new Map<string, AbortController>();
 const interruptedRuns = new Set<string>();
 const usageDashboardSessions = new Map<string, UsageDashboardSession>();
+const modelPickerSessions = new Map<string, ModelPickerSession>();
 const pendingSteers = new Map<string, PendingSteer>();
 const queuedSteers = new Map<string, QueuedSteer[]>();
 const pendingAccessRequests = new Map<string, PendingAccess>();
@@ -149,6 +153,12 @@ const SETTINGS_PAGE_SELECT_ID = 'codex:settings-page';
 const SETTINGS_BUTTON_ID = 'codex:settings-panel';
 const TOKEN_STATS_BUTTON_ID = 'codex:token-stats';
 const FINAL_RESPONSE_SELECT_ID = 'codex:set-final-response';
+const FAILOVER_SELECT_ID = 'codex:set-failover';
+const ADD_ACCOUNT_BUTTON_ID = 'codex:add-account';
+const ADD_ACCOUNT_PROVIDER_SELECT_ID = 'codex:add-account-provider';
+const ADD_ACCOUNT_MODAL_ID = 'codex:add-account-modal';
+const MODEL_PICKER_PREV_ID = 'codex:model-prev';
+const MODEL_PICKER_NEXT_ID = 'codex:model-next';
 const ACCESS_APPROVE_ID = 'codex:approve-access';
 const CONVERSATION_SELECT_ID = 'codex:load-conversation';
 const CHAT_LINK_SELECT_ID = 'codex:chat-link';
@@ -216,7 +226,7 @@ const permissionChoices: { label: string; value: PermissionMode; description: st
     { label: 'Directory Only', value: 'directory', description: 'Ask before elevated access.' },
     { label: 'Auto-Review', value: 'auto-review', description: 'Run read-only by default.' }
 ];
-const settingsPages: SettingsPage[] = ['runtime', 'access', 'notifications', 'display'];
+const settingsPages: SettingsPage[] = ['runtime', 'access', 'notifications', 'display', 'failover'];
 const idleProgressLabels = [
     'Thinking through the next step',
     'Checking the shape of the task',
@@ -575,6 +585,21 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.isButton() && interaction.customId === ADD_ACCOUNT_BUTTON_ID) {
+            await this.showAddAccountProviderPicker(interaction);
+            return;
+        }
+
+        if (interaction.isButton() && (interaction.customId.startsWith(MODEL_PICKER_PREV_ID) || interaction.customId.startsWith(MODEL_PICKER_NEXT_ID))) {
+            await interaction.deferUpdate();
+            const parts = interaction.customId.split(':');
+            const page = Math.max(0, Number(parts.at(-1)) || 0);
+            const sessionId = parts.at(-2) || '';
+
+            await interaction.editReply(this.createModelPickerPayload(sessionId, page));
+            return;
+        }
+
         if (interaction.isButton() && interaction.customId === ACCESS_USERS_BUTTON_ID) {
             await interaction.showModal(await this.createAccessUsersModal());
             return;
@@ -654,7 +679,7 @@ export class DiscordCodexBridge {
             const values = interaction.values.filter(isProviderType);
 
             await updateBridgeSettings({ providerPriority: values });
-            await this.updateSettingsDashboard(interaction, 'runtime');
+            await this.updateSettingsDashboard(interaction, 'failover');
             return;
         }
 
@@ -698,6 +723,23 @@ export class DiscordCodexBridge {
         if (interaction.isStringSelectMenu() && interaction.customId === FINAL_RESPONSE_SELECT_ID) {
             await updateBridgeSettings({ finalResponsesAsImages: interaction.values[0] === 'images' });
             await this.updateSettingsDashboard(interaction, 'display');
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId === FAILOVER_SELECT_ID) {
+            await updateBridgeSettings({ autoSwitchOnLimit: interaction.values[0] === 'on' });
+            await this.updateSettingsDashboard(interaction, 'failover');
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId === ADD_ACCOUNT_PROVIDER_SELECT_ID) {
+            const provider = interaction.values[0];
+
+            if (!isProviderType(provider)) {
+                await interaction.reply({ content: 'That provider is not supported.', flags: MessageFlags.Ephemeral });
+                return;
+            }
+            await interaction.showModal(this.createAddAccountModal(provider));
             return;
         }
 
@@ -903,6 +945,40 @@ export class DiscordCodexBridge {
 
             await updateBridgeSettings({ allowedUserIds, primaryAllowedUserId });
             await this.showSettingsDashboard(interaction, 'access');
+            return;
+        }
+
+        if (interaction.customId.startsWith(`${ADD_ACCOUNT_MODAL_ID}:`)) {
+            const provider = interaction.customId.split(':').at(-1) || '';
+
+            if (!isProviderType(provider)) {
+                await interaction.reply({ content: 'That provider is not supported.', flags: MessageFlags.Ephemeral });
+                return;
+            }
+            const name = interaction.fields.getTextInputValue('name').trim();
+            const apiKey = interaction.fields.getTextInputValue('apiKey').trim();
+            const email = interaction.fields.getTextInputValue('email').trim();
+            const priority = Number(interaction.fields.getTextInputValue('priority').trim());
+            const command = interaction.fields.getTextInputValue('command').trim();
+            const account = await this.accounts.addAccount({
+                name,
+                provider,
+                email,
+                priority: Number.isFinite(priority) ? priority : undefined,
+                command: command || undefined,
+                auth_mode: apiKey ? 'api_key' : 'login',
+                auth_data: apiKey ? {
+                    api_key: apiKey,
+                    env_key: this.defaultApiKeyName(provider)
+                } : {
+                    type: 'login'
+                }
+            }, true);
+
+            await interaction.reply({
+                content: `Added and activated ${account.name}.`,
+                flags: MessageFlags.Ephemeral
+            });
         }
     }
 
@@ -1610,30 +1686,20 @@ export class DiscordCodexBridge {
     private async showModelPicker(interaction: ButtonInteraction): Promise<void> {
         const settings = await getBridgeSettings();
         const model = getEffectiveModel(settings, this.config.defaultModel);
-        const modelOptions = listModelChoices().map(choice => ({
-            label: choice.name.slice(0, 100),
-            value: choice.value,
-            default: choice.value === DEFAULT_MODEL_CHOICE ? !settings.model : choice.value === model
-        }));
+        const provider = getEffectiveProvider(settings, this.config.defaultProvider);
+        const models = await this.getModelChoices(provider);
+        const sessionId = this.createUsageSessionId();
+        const pages = this.chunkModels(models, 23);
 
-        if (settings.model && !modelOptions.some(option => option.value === model)) {
-            modelOptions.unshift({
-                label: model.slice(0, 100),
-                value: model,
-                default: true
-            });
-        }
+        modelPickerSessions.set(sessionId, {
+            id: sessionId,
+            provider,
+            createdAt: Date.now(),
+            pages
+        });
 
         await interaction.reply({
-            content: '',
-            components: [
-                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-                    new StringSelectMenuBuilder()
-                        .setCustomId(MODEL_SELECT_ID)
-                        .setPlaceholder(`Model: ${model}`)
-                        .addOptions(modelOptions.slice(0, 25))
-                )
-            ],
+            ...this.createModelPickerPayload(sessionId, 0, model),
             flags: MessageFlags.Ephemeral
         });
         this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, true);
@@ -1699,6 +1765,149 @@ export class DiscordCodexBridge {
             files: [file],
             flags: 64
         });
+    }
+
+    private async showAddAccountProviderPicker(interaction: ButtonInteraction): Promise<void> {
+        await interaction.reply({
+            content: 'Choose the provider to add. API keys are stored only in the local Discode account file.',
+            components: [
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(ADD_ACCOUNT_PROVIDER_SELECT_ID)
+                        .setPlaceholder('Provider')
+                        .addOptions(providerChoices.map(choice => ({
+                            label: choice.label,
+                            value: choice.value,
+                            description: choice.description
+                        })))
+                )
+            ],
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    private createAddAccountModal(provider: ProviderType): ModalBuilder {
+        return new ModalBuilder()
+            .setCustomId(`${ADD_ACCOUNT_MODAL_ID}:${provider}`)
+            .setTitle(`Add ${this.capitalize(provider)} account`)
+            .addComponents(
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('name')
+                        .setLabel('Account name')
+                        .setStyle(TextInputStyle.Short)
+                        .setRequired(true)
+                ),
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('apiKey')
+                        .setLabel(`${this.defaultApiKeyName(provider)} or login note`)
+                        .setStyle(TextInputStyle.Short)
+                        .setRequired(false)
+                ),
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('email')
+                        .setLabel('Email or label')
+                        .setStyle(TextInputStyle.Short)
+                        .setRequired(false)
+                ),
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('priority')
+                        .setLabel('Priority')
+                        .setStyle(TextInputStyle.Short)
+                        .setRequired(false)
+                ),
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('command')
+                        .setLabel('Command override')
+                        .setStyle(TextInputStyle.Short)
+                        .setRequired(false)
+                )
+            );
+    }
+
+    private createModelPickerPayload(sessionId: string, page: number, activeModel?: string): { content: string; components: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] } {
+        const session = modelPickerSessions.get(sessionId);
+
+        if (!session) {
+            return {
+                content: 'That model picker expired.',
+                components: []
+            };
+        }
+        const pageCount = Math.max(1, session.pages.length);
+        const normalizedPage = Math.min(Math.max(page, 0), pageCount - 1);
+        const models = session.pages[normalizedPage] || [];
+
+        session.createdAt = Date.now();
+
+        return {
+            content: '',
+            components: [
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(MODEL_SELECT_ID)
+                        .setPlaceholder(`Model page ${normalizedPage + 1}/${pageCount}`)
+                        .addOptions([
+                            {
+                                label: 'Config default',
+                                value: DEFAULT_MODEL_CHOICE,
+                                description: 'Use the configured provider default.',
+                                default: !activeModel || activeModel === 'config default'
+                            },
+                            ...models.map(model => ({
+                                label: model.name.slice(0, 100),
+                                value: model.value.slice(0, 100),
+                                description: `${model.provider}${model.reasoning ? ' · thinking' : ''}${model.toolCall ? ' · tools' : ''}`.slice(0, 100),
+                                default: activeModel === model.value
+                            }))
+                        ])
+                ),
+                new ActionRowBuilder<ButtonBuilder>().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`${MODEL_PICKER_PREV_ID}:${sessionId}:${Math.max(0, normalizedPage - 1)}`)
+                        .setLabel('Previous')
+                        .setStyle(ButtonStyle.Secondary)
+                        .setDisabled(normalizedPage === 0),
+                    new ButtonBuilder()
+                        .setCustomId(`${MODEL_PICKER_NEXT_ID}:${sessionId}:${Math.min(pageCount - 1, normalizedPage + 1)}`)
+                        .setLabel('Next')
+                        .setStyle(ButtonStyle.Secondary)
+                        .setDisabled(normalizedPage >= pageCount - 1)
+                )
+            ]
+        };
+    }
+
+    private async getModelChoices(provider: ProviderType): Promise<ModelChoiceMetadata[]> {
+        try {
+            const catalog = await listAvailableModels(provider);
+
+            if (catalog.length > 0) return catalog;
+        } catch (error) {
+            console.warn('Failed to read model catalog:', error);
+        }
+
+        return listModelChoices().map(choice => ({
+            name: choice.name,
+            value: choice.value,
+            provider: provider === 'codex' ? 'Codex' : this.capitalize(provider),
+            reasoning: false,
+            toolCall: false
+        }));
+    }
+
+    private chunkModels(models: ModelChoiceMetadata[], size: number): ModelChoiceMetadata[][] {
+        const chunks: ModelChoiceMetadata[][] = [];
+
+        for (let index = 0; index < models.length; index += size) {
+            chunks.push(models.slice(index, index + size));
+        }
+
+        return chunks.length > 0 ? chunks : [[]];
     }
 
     private async showWorkspaceDashboard(interaction: ChatInputCommandInteraction | ModalSubmitInteraction): Promise<void> {
@@ -1949,7 +2158,11 @@ export class DiscordCodexBridge {
                     .setCustomId(`${USAGE_NEXT_ID}:${sessionId}:${Math.min(pageCount - 1, normalizedPage + 1)}`)
                     .setLabel('Next')
                     .setStyle(ButtonStyle.Secondary)
-                    .setDisabled(normalizedPage >= pageCount - 1)
+                    .setDisabled(normalizedPage >= pageCount - 1),
+                new ButtonBuilder()
+                    .setCustomId(ADD_ACCOUNT_BUTTON_ID)
+                    .setLabel('Add account')
+                    .setStyle(ButtonStyle.Secondary)
             ),
             new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
                 new StringSelectMenuBuilder()
@@ -2243,6 +2456,7 @@ export class DiscordCodexBridge {
         const notifyUsageLimit = getEffectiveNotifyUsageLimit(settings);
         const slashResponsesEphemeral = getEffectiveSlashResponsesEphemeral(settings);
         const finalResponsesAsImages = getEffectiveFinalResponsesAsImages(settings);
+        const autoSwitchOnLimit = getEffectiveAutoSwitchOnLimit(settings, this.config.autoSwitchOnLimit);
         const modelOptions = listModelChoices().map(choice => ({
             label: choice.name.slice(0, 100),
             value: choice.value,
@@ -2354,6 +2568,34 @@ export class DiscordCodexBridge {
             ];
         }
 
+        if (page === 'failover') {
+            return [
+                pageRow,
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(FAILOVER_SELECT_ID)
+                        .setPlaceholder(`Usage limit rerouting: ${autoSwitchOnLimit ? 'On' : 'Off'}`)
+                        .addOptions([
+                            { label: 'On', value: 'on', description: 'Try the next account or fallback provider on limits.', default: autoSwitchOnLimit },
+                            { label: 'Off', value: 'off', description: 'Stop and show manual retry controls on limits.', default: !autoSwitchOnLimit }
+                        ])
+                ),
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(PROVIDER_PRIORITY_SELECT_ID)
+                        .setPlaceholder('Fallback priority')
+                        .setMinValues(1)
+                        .setMaxValues(providerChoices.length)
+                        .addOptions(providerChoices.map(choice => ({
+                            label: choice.label,
+                            value: choice.value,
+                            description: choice.description,
+                            default: providerPriority.includes(choice.value)
+                        })))
+                )
+            ];
+        }
+
         return [
             pageRow,
             new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
@@ -2404,6 +2646,14 @@ export class DiscordCodexBridge {
         if (permissionMode === 'auto-review') return 'Auto-review';
 
         return 'Full access';
+    }
+
+    private defaultApiKeyName(provider: ProviderType): string {
+        if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
+        if (provider === 'zai') return 'ZAI_API_KEY';
+        if (provider === 'qwen') return 'QWEN_API_KEY';
+
+        return 'OPENAI_API_KEY';
     }
 
     private createWorkspaceModal(): ModalBuilder {

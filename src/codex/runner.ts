@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { BridgeConfig } from '../config.js';
-import { PermissionMode, ProviderType } from '../state/settings.js';
+import { getBridgeSettings, getEffectiveAutoSwitchOnLimit, getEffectiveProviderPriority, PermissionMode, ProviderType } from '../state/settings.js';
 import { AccountProvider, AccountRouter } from '../accounts/router.js';
 
 export interface CodexRunOptions {
@@ -74,10 +74,43 @@ export class CodexRunner {
     ) {}
 
     async runPrompt(options: CodexRunOptions): Promise<CodexRunResult> {
+        const settings = await getBridgeSettings();
+        const autoSwitchOnLimit = getEffectiveAutoSwitchOnLimit(settings, this.config.autoSwitchOnLimit);
         const run = () => this.runPromptOnce(options);
         const firstResult = await run();
 
-        if (firstResult.ok || !this.config.autoSwitchOnLimit || !looksLikeLimit(firstResult.error || '')) {
+        if (firstResult.ok || !autoSwitchOnLimit || !looksLikeLimit(firstResult.error || firstResult.text || '')) {
+            return firstResult;
+        }
+
+        const limitedAccount = await this.accounts.getActiveAccount();
+        const nextAccount = await this.accounts.switchToNext();
+
+        if (nextAccount && nextAccount.id !== limitedAccount?.id) {
+            const retryResult = await run();
+
+            if (retryResult.ok || !looksLikeLimit(retryResult.error || retryResult.text || '')) {
+                retryResult.switchedAccountName = nextAccount.name;
+                retryResult.limitError = firstResult.error || firstResult.text;
+                retryResult.limitAccountId = limitedAccount?.id || null;
+                retryResult.limitAccountName = limitedAccount?.name || null;
+
+                return retryResult;
+            }
+        }
+
+        const retryResult = await this.runPromptWithFallbackProvider(options, firstResult, settings);
+
+        return retryResult;
+    }
+
+    async runReview(options: CodexReviewOptions): Promise<CodexRunResult> {
+        const settings = await getBridgeSettings();
+        const autoSwitchOnLimit = getEffectiveAutoSwitchOnLimit(settings, this.config.autoSwitchOnLimit);
+        const run = () => this.runReviewOnce(options);
+        const firstResult = await run();
+
+        if (firstResult.ok || !autoSwitchOnLimit || !looksLikeLimit(firstResult.error || firstResult.text || '')) {
             return firstResult;
         }
 
@@ -94,25 +127,25 @@ export class CodexRunner {
         return retryResult;
     }
 
-    async runReview(options: CodexReviewOptions): Promise<CodexRunResult> {
-        const run = () => this.runReviewOnce(options);
-        const firstResult = await run();
+    private async runPromptWithFallbackProvider(options: CodexRunOptions, firstResult: CodexRunResult, settings: Awaited<ReturnType<typeof getBridgeSettings>>): Promise<CodexRunResult> {
+        const currentProvider = await this.getProvider(options.provider);
+        const fallbackProviders = getEffectiveProviderPriority(settings, this.config.defaultProviderPriority)
+            .filter(provider => provider !== currentProvider);
 
-        if (firstResult.ok || !this.config.autoSwitchOnLimit || !looksLikeLimit(firstResult.error || '')) {
-            return firstResult;
+        for (const provider of fallbackProviders) {
+            const retryResult = await this.runPromptOnce({
+                ...options,
+                provider
+            });
+
+            retryResult.limitError = firstResult.error || firstResult.text;
+            if (retryResult.ok || !looksLikeLimit(retryResult.error || retryResult.text || '')) {
+                retryResult.switchedAccountName = `${provider} fallback`;
+                return retryResult;
+            }
         }
 
-        const limitedAccount = await this.accounts.getActiveAccount();
-        const nextAccount = await this.accounts.switchToNext();
-
-        if (!nextAccount) return firstResult;
-        const retryResult = await run();
-        retryResult.switchedAccountName = nextAccount.name;
-        retryResult.limitError = firstResult.error || firstResult.text;
-        retryResult.limitAccountId = limitedAccount?.id || null;
-        retryResult.limitAccountName = limitedAccount?.name || null;
-
-        return retryResult;
+        return firstResult;
     }
 
     async runRaw(argsText: string, workspace?: string): Promise<CodexRunResult> {

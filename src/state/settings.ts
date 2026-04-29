@@ -21,6 +21,7 @@ export interface BridgeSettings {
     notifyUsageLimit?: boolean;
     slashResponsesEphemeral?: boolean;
     finalResponsesAsImages?: boolean;
+    autoSwitchOnLimit?: boolean;
 }
 
 export interface ModelChoice {
@@ -145,6 +146,10 @@ export function getEffectiveSlashResponsesEphemeral(settings: BridgeSettings): b
 
 export function getEffectiveFinalResponsesAsImages(settings: BridgeSettings): boolean {
     return settings.finalResponsesAsImages ?? true;
+}
+
+export function getEffectiveAutoSwitchOnLimit(settings: BridgeSettings, defaultValue: boolean): boolean {
+    return settings.autoSwitchOnLimit ?? defaultValue;
 }
 
 export function isReasoningEffort(value: unknown): value is ReasoningEffort {

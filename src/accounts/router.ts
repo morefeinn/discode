@@ -161,6 +161,36 @@ export class AccountRouter {
         return account;
     }
 
+    async addAccount(input: Partial<DiscodeAccount>, activate = false): Promise<DiscodeAccount> {
+        const state = await this.readState();
+        const provider = this.normalizeProvider(input.provider);
+        const account: DiscodeAccount = {
+            id: this.uniqueAccountId(state, input.id || input.name || provider),
+            name: input.name?.trim() || `${this.providerLabel(provider)} ${state.accounts.length + 1}`,
+            provider,
+            email: input.email?.trim() || undefined,
+            plan_type: input.plan_type?.trim() || input.auth_mode || 'api_key',
+            auth_mode: input.auth_mode || 'api_key',
+            auth_data: input.auth_data || {},
+            env: input.env,
+            command: input.command?.trim() || undefined,
+            usage_command: input.usage_command?.trim() || undefined,
+            model: input.model?.trim() || undefined,
+            priority: Number.isFinite(input.priority) ? Number(input.priority) : state.accounts.length + 1,
+            last_used_at: activate || state.accounts.length === 0 ? new Date().toISOString() : undefined
+        };
+
+        state.accounts.push(account);
+        if (activate || !state.active_account_id) state.active_account_id = account.id;
+        await this.writeState(state);
+
+        if (state.active_account_id === account.id) {
+            await this.activateAccount(state, account);
+        }
+
+        return account;
+    }
+
     private async readNativeState(): Promise<AccountState | null> {
         if (!existsSync(this.accountsPath)) return null;
 
@@ -310,6 +340,32 @@ export class AccountRouter {
         if (provider === 'qwen') return 'QWEN_API_KEY';
 
         return 'OPENAI_API_KEY';
+    }
+
+    private uniqueAccountId(state: AccountState, value: string): string {
+        const base = value
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .slice(0, 48) || 'account';
+        let id = base;
+        let suffix = 2;
+
+        while (state.accounts.some(account => account.id === id)) {
+            id = `${base}-${suffix}`;
+            suffix += 1;
+        }
+
+        return id;
+    }
+
+    private providerLabel(provider: AccountProvider): string {
+        if (provider === 'anthropic') return 'Anthropic';
+        if (provider === 'zai') return 'Z.ai';
+        if (provider === 'qwen') return 'Qwen';
+        if (provider === 'opencode') return 'OpenCode';
+
+        return 'Codex';
     }
 
     private maskEmail(value: string | undefined): string {

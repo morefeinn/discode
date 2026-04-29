@@ -62,6 +62,7 @@ discode stop
 discode status
 discode logs
 discode accounts
+discode accounts add
 discode switch next
 ```
 
@@ -144,6 +145,10 @@ On first run, Discode can import existing Codex sessions from `~/.codex-switcher
 ```
 
 Supported providers are `codex`, `opencode`, `anthropic`, `zai`, `qwen`, and `custom`. Account `priority` controls account ordering, and `DISCODE_PROVIDER_PRIORITY` controls fallback provider order. Account `env` values and API keys are passed only to child agent processes.
+
+Use `discode accounts add` or the `/usage` dashboard's `Add account` button to add Codex/OpenAI, Anthropic, OpenCode, Z.ai, Qwen, or custom accounts. The flow mirrors OpenCode's provider setup style: use an existing logged-in provider CLI when available, or enter the provider API key locally. API keys are stored in `data/accounts.json` with mode `0600` and injected only into child agent processes.
+
+Model pickers use the configured model list plus the public models.dev catalog when available, so provider models show whether they support thinking/reasoning and tool calls.
 
 Usage checks support Codex session usage automatically. Other providers can expose credits or limits by adding `credits_balance`, `remaining_percent`, or a `usage_command` to the account. `usage_command` should print JSON with fields such as `primaryWindow`, `secondaryWindow`, or `creditsBalance`.
 
