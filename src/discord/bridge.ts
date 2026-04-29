@@ -204,6 +204,13 @@ const permissionChoices: { label: string; value: PermissionMode; description: st
     { label: 'Auto-Review', value: 'auto-review', description: 'Run read-only by default.' }
 ];
 const settingsPages: SettingsPage[] = ['runtime', 'access', 'notifications'];
+const idleProgressLabels = [
+    'Thinking through the next step',
+    'Checking the shape of the task',
+    'Keeping the context focused',
+    'Planning the next tool call',
+    'Waiting on the model'
+];
 
 export class DiscordCodexBridge {
     private botName = 'Discode';
@@ -1895,11 +1902,14 @@ export class DiscordCodexBridge {
 
     private createProgressUpdater(target: ResponseTarget): { push: (label: string, text?: string) => void; flush: () => Promise<void> } {
         const lines: string[] = [];
+        let idleLabel: string | null = null;
+        let idleIndex = 0;
         let lastUpdate = 0;
+        let lastEventAt = Date.now();
         let pending = Promise.resolve();
 
         const render = () => {
-            const latest = lines.at(-1) || 'Starting';
+            const latest = idleLabel || lines.at(-1) || 'Starting';
 
             return latest;
         };
@@ -1922,14 +1932,25 @@ export class DiscordCodexBridge {
                 await target.editReply(payload).catch(() => undefined);
             }
         };
+        const pulse = setInterval(() => {
+            if (Date.now() - lastEventAt < 9000) return;
+
+            idleLabel = idleProgressLabels[idleIndex % idleProgressLabels.length];
+            idleIndex += 1;
+            pending = pending.then(edit).catch(() => undefined);
+        }, 9000);
+        pulse.unref?.();
 
         return {
             push: (label: string, text?: string) => {
                 const suffix = text ? `: ${text.replace(/\s+/g, ' ').slice(0, 180)}` : '';
+                idleLabel = null;
+                lastEventAt = Date.now();
                 lines.push(`${label}${suffix}`);
                 pending = pending.then(edit).catch(() => undefined);
             },
             flush: async () => {
+                clearInterval(pulse);
                 await pending;
             }
         };

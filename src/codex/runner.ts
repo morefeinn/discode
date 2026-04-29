@@ -546,23 +546,28 @@ function parseCodexEvent(line: string): { label?: string; text?: string; threadI
         };
 
         if (event.type === 'thread.started' && event.thread_id) {
-            return { label: 'Started Codex thread', threadId: event.thread_id };
+            return { label: 'Opening the agent thread', threadId: event.thread_id };
         }
 
         if (event.type === 'turn.started') {
-            return { label: 'Thinking' };
+            return { label: 'Thinking through the request' };
         }
 
-        if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
-            return { label: 'Drafted response', text: event.item.text };
+        if (event.item?.type === 'agent_message' && (event.type === 'item.started' || event.type === 'item.completed')) {
+            return { label: 'Thinking through the response' };
         }
 
-        if (event.type === 'item.completed' && event.item?.type === 'command_execution') {
-            return { label: `Ran ${event.item.command || 'command'}` };
+        if (event.item?.type === 'command_execution' && (event.type === 'item.started' || event.type === 'item.completed')) {
+            const activity = describeCommandActivity(event.item.command || '');
+
+            return {
+                label: event.type === 'item.completed' ? activity.doneLabel : activity.label,
+                text: activity.text
+            };
         }
 
         if (event.type === 'turn.completed') {
-            return { label: 'Completed', usage: normalizeUsage(event.usage) };
+            return { label: 'Finishing up', usage: normalizeUsage(event.usage) };
         }
 
         if (event.type === 'error' && event.message) {
@@ -576,6 +581,38 @@ function parseCodexEvent(line: string): { label?: string; text?: string; threadI
     }
 
     return null;
+}
+
+function describeCommandActivity(command: string): { label: string; doneLabel: string; text?: string } {
+    const normalized = command.replace(/\s+/g, ' ').trim();
+    const shortCommand = normalized.length > 110 ? `${normalized.slice(0, 107).trimEnd()}...` : normalized;
+    const executable = normalized.match(/^([\w./:-]+)/)?.[1]?.split('/').pop()?.toLowerCase() || '';
+
+    if (['rg', 'grep', 'find', 'fd', 'ls', 'tree', 'sed', 'cat', 'head', 'tail', 'wc', 'pwd'].includes(executable)) {
+        return { label: 'Inspecting project files', doneLabel: 'Finished inspecting files', text: shortCommand };
+    }
+
+    if (executable === 'git') {
+        if (/\b(?:push|commit|add|tag|merge|rebase|cherry-pick)\b/.test(normalized)) {
+            return { label: 'Updating git state', doneLabel: 'Updated git state', text: shortCommand };
+        }
+
+        return { label: 'Checking git state', doneLabel: 'Finished checking git', text: shortCommand };
+    }
+
+    if (['bun', 'npm', 'pnpm', 'yarn', 'node', 'tsc', 'cargo', 'go', 'python', 'python3', 'pytest', 'stylua'].includes(executable)) {
+        return { label: 'Running project checks', doneLabel: 'Finished project checks', text: shortCommand };
+    }
+
+    if (['mkdir', 'cp', 'mv', 'rm', 'chmod', 'touch'].includes(executable)) {
+        return { label: 'Updating local files', doneLabel: 'Finished updating files', text: shortCommand };
+    }
+
+    if (!shortCommand) {
+        return { label: 'Using a tool', doneLabel: 'Finished using a tool' };
+    }
+
+    return { label: 'Running a tool command', doneLabel: 'Finished tool command', text: shortCommand };
 }
 
 function normalizeUsage(usage: CodexUsage | undefined): CodexUsage | null {
