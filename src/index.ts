@@ -5,6 +5,7 @@ import { CodexRunner } from './codex/runner.js';
 import { AccountRouter } from './accounts/router.js';
 import { DiscordCodexBridge } from './discord/bridge.js';
 import { registerSlashCommands } from './discord/commands.js';
+import { checkForUpdate, formatUpdateNotice } from './update/checker.js';
 
 const config = loadConfig();
 
@@ -41,6 +42,10 @@ client.once(Events.ClientReady, async () => {
         const registered = await registerSlashCommands(config, botName, [...client.guilds.cache.keys()]);
         bridge.setBotIdentity(botName, registered.primaryName);
         console.log(`Registered slash commands: ${registered.names.join(', ')}.`);
+        const updateStatus = await checkForUpdate(process.cwd());
+        const updateNotice = formatUpdateNotice(updateStatus);
+
+        if (updateNotice) console.log(updateNotice);
         await bridge.recoverRunningRuns(client);
     } catch (error) {
         console.error('Failed to register slash commands:', error);

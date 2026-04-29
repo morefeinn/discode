@@ -68,6 +68,12 @@ import {
 import { listRunningRuns, saveRun, updateRun, RunRecord } from '../state/runs.js';
 import { getTranscript } from '../state/transcript.js';
 import { recordUsageLimit } from '../state/usage.js';
+import {
+    checkForUpdate,
+    formatUpdateNotice,
+    markUpdateNotified,
+    shouldNotifyUpdate
+} from '../update/checker.js';
 import { renderChatCard } from './chatCard.js';
 import { collectDiscordContext, collectTargetChannelContext, withDiscordContext } from './context.js';
 import { createInitPrompt } from './initPrompt.js';
@@ -273,11 +279,13 @@ export class DiscordCodexBridge {
         }
 
         if (interaction.commandName === 'init') {
+            await this.notifyUpdateIfNeeded(interaction);
             await this.handleInitInteraction(interaction);
             return;
         }
 
         if (interaction.commandName !== this.commandName) return;
+        await this.notifyUpdateIfNeeded(interaction);
 
         const subcommand = interaction.options.getSubcommand();
 
@@ -910,6 +918,8 @@ export class DiscordCodexBridge {
 
             return false;
         }
+
+        await this.notifyUpdateIfNeeded(message);
 
         if (prompt === null && this.shouldIgnoreThreadMessage(message)) return false;
 
@@ -2401,6 +2411,27 @@ export class DiscordCodexBridge {
 
     private async isAuthorized(userId: string): Promise<boolean> {
         return (await this.getAllowedUserIds()).includes(userId);
+    }
+
+    private async notifyUpdateIfNeeded(target: ResponseTarget): Promise<void> {
+        const status = await checkForUpdate(process.cwd());
+
+        if (!status.updateAvailable) return;
+        if (!(await shouldNotifyUpdate(process.cwd(), 'discordLatest', status.latest))) return;
+        const notice = formatUpdateNotice(status);
+
+        if (!notice) return;
+        await markUpdateNotified(process.cwd(), 'discordLatest', status.latest);
+
+        if (target instanceof Message) {
+            await target.reply(notice).catch(() => undefined);
+            return;
+        }
+        const channel = target.channel;
+
+        if (channel && 'send' in channel) {
+            await (channel as any).send(`${await this.getUserMention(target.user.id)} ${notice}`).catch(() => undefined);
+        }
     }
 
     private async getAllowedUserIds(): Promise<string[]> {

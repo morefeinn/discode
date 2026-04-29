@@ -6,10 +6,10 @@ Discode lets one or more approved Discord users drive local coding agents from D
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/morefeinn/discode/main/install.sh | sh
-codex-bot start --background
+discode start --background
 ```
 
-The installer checks for Git and Bun, asks before installing missing dependencies, links the `codex-bot` CLI, then runs Discode setup.
+The installer checks for Git and Bun, asks before installing missing dependencies, links the `discode` CLI, then runs Discode setup.
 
 Manual install:
 
@@ -18,7 +18,7 @@ git clone https://github.com/morefeinn/discode.git
 cd discode
 bun install
 bun link
-codex-bot setup
+discode setup
 ```
 
 The Discode installer writes a local `.env`. Required values are:
@@ -52,18 +52,20 @@ Useful optional flags:
 ## Commands
 
 ```bash
-codex-bot setup
-codex-bot start
-codex-bot start --background
-codex-bot restart
-codex-bot stop
-codex-bot status
-codex-bot logs
-codex-bot accounts
-codex-bot switch next
+discode setup
+discode update --check
+discode update
+discode start
+discode start --background
+discode restart
+discode stop
+discode status
+discode logs
+discode accounts
+discode switch next
 ```
 
-`discode` is an alias for the same CLI.
+`codex-bot` still works as a compatibility alias, but new docs and update prompts use `discode`.
 
 ## Development
 

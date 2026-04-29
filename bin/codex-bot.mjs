@@ -6,6 +6,12 @@ import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
+import {
+    checkForUpdate,
+    formatUpdateNotice,
+    markUpdateNotified,
+    shouldNotifyUpdate
+} from '../src/update/checker.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const rootDir = path.resolve(path.dirname(__filename), '..');
@@ -340,7 +346,7 @@ async function setup() {
         writeEnvValues(values);
         ensureDataDir();
         console.log('Wrote .env');
-        console.log('Run codex-bot start to launch Discode.');
+        console.log('Run discode start to launch Discode.');
     } finally {
         rl.close();
     }
@@ -372,7 +378,7 @@ function startBackground() {
 
     child.unref();
     fs.writeFileSync(pidPath, `${child.pid}\n`);
-    console.log(`codex-bot started in the background (pid ${child.pid}).`);
+    console.log(`Discode started in the background (pid ${child.pid}).`);
     console.log(`logs: ${logPath}`);
 }
 
@@ -388,7 +394,7 @@ function stopExistingInstances() {
     if (isProcessRunning(pid)) {
         process.kill(pid, 'SIGTERM');
         stopped.add(pid);
-        console.log(`stopped existing codex-bot pid ${pid}.`);
+        console.log(`stopped existing Discode pid ${pid}.`);
     }
     fs.rmSync(pidPath, { force: true });
     const pattern = `${rootDir}/src/index.ts`;
@@ -403,7 +409,7 @@ function stopExistingInstances() {
 
         try {
             process.kill(foundPid, 'SIGTERM');
-            console.log(`stopped existing codex-bot pid ${foundPid}.`);
+            console.log(`stopped existing Discode pid ${foundPid}.`);
         } catch {
         }
     }
@@ -413,11 +419,11 @@ function status() {
     const pid = readPid();
 
     if (isProcessRunning(pid)) {
-        console.log(`codex-bot is running (pid ${pid}).`);
+        console.log(`Discode is running (pid ${pid}).`);
         console.log(`logs: ${logPath}`);
         return;
     }
-    console.log('codex-bot is stopped.');
+    console.log('Discode is stopped.');
 }
 
 function logs() {
@@ -435,7 +441,7 @@ function resolveRuntime() {
 
     if (bun) return bun;
 
-    console.error('bun is required to run codex-bot.');
+    console.error('bun is required to run Discode.');
     process.exit(1);
 }
 
@@ -537,7 +543,7 @@ function findAccount(state, query) {
 
 function switchAccount(query) {
     if (!query) {
-        console.error('Usage: codex-bot switch <index|name|id|next>');
+        console.error('Usage: discode switch <index|name|id|next>');
         process.exit(1);
     }
     const state = readAccountState();
@@ -564,24 +570,99 @@ function switchAccount(query) {
     console.log(`Switched Discode to ${accountName(account, 0)}.`);
 }
 
+async function printUpdateNoticeIfNeeded() {
+    if (['setup', 'update', 'version', 'help'].includes(command)) return;
+    const status = await checkForUpdate(rootDir);
+
+    if (!status.updateAvailable) return;
+    if (!(await shouldNotifyUpdate(rootDir, 'cliLatest', status.latest))) return;
+
+    console.log(formatUpdateNotice(status));
+    await markUpdateNotified(rootDir, 'cliLatest', status.latest);
+}
+
+async function checkUpdates() {
+    const status = await checkForUpdate(rootDir, true);
+
+    if (!status.ok) {
+        console.log(`Could not check for updates: ${status.error || 'unknown error'}`);
+        return;
+    }
+
+    if (!status.updateAvailable) {
+        console.log(`Discode is up to date (${status.current}).`);
+        return;
+    }
+
+    console.log(formatUpdateNotice(status));
+}
+
+async function updateDiscode() {
+    const status = await checkForUpdate(rootDir, true);
+
+    if (!status.ok) {
+        throw new Error(`Could not check for updates: ${status.error || 'unknown error'}`);
+    }
+
+    if (!status.updateAvailable) {
+        console.log(`Discode is already up to date (${status.current}).`);
+        return;
+    }
+
+    const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: rootDir, encoding: 'utf8' }).stdout.trim();
+
+    if (dirty) {
+        throw new Error('Discode has local changes. Commit or stash them before running discode update.');
+    }
+
+    runChecked('git', ['pull', '--ff-only', 'origin', 'main']);
+    runChecked(resolveRuntime(), ['install']);
+    await markUpdateNotified(rootDir, 'cliLatest', status.latest);
+    await markUpdateNotified(rootDir, 'discordLatest', status.latest);
+    console.log('Discode updated. Run `discode restart` to use the new version.');
+}
+
+function runChecked(bin, args) {
+    const result = spawnSync(bin, args, {
+        cwd: rootDir,
+        stdio: 'inherit'
+    });
+
+    if (result.status !== 0) {
+        throw new Error(`${bin} ${args.join(' ')} failed.`);
+    }
+}
+
 function help() {
-    console.log(`codex-bot ${packageJson.version}
-  codex-bot setup              Run the Discode installer
-  codex-bot setup --headless   Write .env from flags or environment
-  codex-bot version            Show version
-  codex-bot start              Start in the foreground
-  codex-bot start --background Start in the background
-  codex-bot stop               Stop background bot
-  codex-bot restart            Restart in the background
-  codex-bot status             Show background status
-  codex-bot logs               Show recent background logs
-  codex-bot accounts           List Discode accounts
-  codex-bot switch <account>   Switch account by index, id, name, or next`);
+    console.log(`discode ${packageJson.version}
+  discode setup              Run the Discode installer
+  discode setup --headless   Write .env from flags or environment
+  discode version            Show version
+  discode update --check     Check for Discode updates
+  discode update             Update Discode from GitHub
+  discode start              Start in the foreground
+  discode start --background Start in the background
+  discode stop               Stop background bot
+  discode restart            Restart in the background
+  discode status             Show background status
+  discode logs               Show recent background logs
+  discode accounts           List Discode accounts
+  discode switch <account>   Switch account by index, id, name, or next
+
+  codex-bot still works as a compatibility alias.`);
 }
 
 try {
+    await printUpdateNoticeIfNeeded();
+
     if (command === 'setup') {
         await setup();
+    } else if (command === 'update') {
+        if (args.includes('--check') || args.includes('-c')) {
+            await checkUpdates();
+        } else {
+            await updateDiscode();
+        }
     } else if (command === 'start') {
         if (args.includes('--background') || args.includes('-d')) {
             startBackground();
