@@ -7,6 +7,7 @@ export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
 export type ProviderType = 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'custom';
 export type PermissionMode = 'full' | 'directory' | 'auto-review';
 export type AgentNamingMode = 'greek' | 'custom';
+export type PersonalityMode = 'default' | 'direct' | 'concise' | 'thorough' | 'friendly' | 'custom';
 
 export interface BridgeSettings {
     model?: string | null;
@@ -25,6 +26,11 @@ export interface BridgeSettings {
     autoSwitchOnLimit?: boolean;
     agentNamingMode?: AgentNamingMode;
     customAgentNames?: string[];
+    memoryEnabled?: boolean;
+    memories?: string;
+    personalityMode?: PersonalityMode;
+    customPersonality?: string;
+    customInstructions?: string;
 }
 
 export interface ModelChoice {
@@ -201,8 +207,39 @@ export function getEffectiveAgentNames(settings: BridgeSettings): string[] {
     return DEFAULT_AGENT_NAMES;
 }
 
+export function getEffectiveMemoryText(settings: BridgeSettings): string {
+    if (settings.memoryEnabled === false) return '';
+
+    return (settings.memories || '').trim().slice(0, 6000);
+}
+
+export function getEffectivePersonalityText(settings: BridgeSettings): string {
+    const mode = isPersonalityMode(settings.personalityMode) ? settings.personalityMode : 'default';
+
+    if (mode === 'custom') return (settings.customPersonality || '').trim().slice(0, 3000);
+    if (mode === 'direct') return 'Be direct, pragmatic, and concise. Lead with the result, then only the details that change decisions.';
+    if (mode === 'concise') return 'Keep responses short and high-signal. Avoid extra explanation unless it prevents confusion.';
+    if (mode === 'thorough') return 'Be careful and complete. Include relevant verification, tradeoffs, and implementation details when they matter.';
+    if (mode === 'friendly') return 'Use a warm, collaborative tone while staying precise and practical.';
+
+    return '';
+}
+
+export function getEffectiveCustomInstructions(settings: BridgeSettings): string {
+    return (settings.customInstructions || '').trim().slice(0, 4000);
+}
+
 export function isAgentNamingMode(value: unknown): value is AgentNamingMode {
     return value === 'greek' || value === 'custom';
+}
+
+export function isPersonalityMode(value: unknown): value is PersonalityMode {
+    return value === 'default'
+        || value === 'direct'
+        || value === 'concise'
+        || value === 'thorough'
+        || value === 'friendly'
+        || value === 'custom';
 }
 
 export function isReasoningEffort(value: unknown): value is ReasoningEffort {

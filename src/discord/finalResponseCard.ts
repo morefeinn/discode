@@ -81,7 +81,7 @@ function bodyText(value: string, x: number, y: number): string {
     const segments = parseInlineMarkdown(value || ' ');
 
     return [
-        `<text x="${x}" y="${y}" fill="#e8e8ef" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="21" font-weight="520" letter-spacing="0">`,
+        `<text x="${x}" y="${y}" fill="#e8e8ef" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="21" font-weight="520" letter-spacing="0" xml:space="preserve">`,
         ...segments.map(segment => renderSegment(segment)),
         '</text>'
     ].join('');
@@ -151,7 +151,7 @@ function renderSegment(segment: InlineSegment): string {
         return `<tspan fill="#7dd3fc" text-decoration="underline">${escapeXml(segment.text)}</tspan>`;
     }
     if (segment.kind === 'code') {
-        return `<tspan fill="#fbbf24" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace">${escapeXml(segment.text)}</tspan>`;
+        return `<tspan fill="#d8d8e4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace">${escapeXml(segment.text)}</tspan>`;
     }
 
     return `<tspan>${escapeXml(segment.text)}</tspan>`;

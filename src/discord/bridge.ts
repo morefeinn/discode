@@ -52,7 +52,10 @@ import {
     getEffectiveFinalResponsesAsImages,
     getEffectiveAutoSwitchOnLimit,
     getEffectiveModel,
+    getEffectiveMemoryText,
     getEffectivePermissionMode,
+    getEffectivePersonalityText,
+    getEffectiveCustomInstructions,
     getEffectiveProvider,
     getEffectiveProviderPriority,
     getEffectiveReasoning,
@@ -68,7 +71,9 @@ import {
     PermissionMode,
     ProviderType,
     ReasoningEffort,
-    AgentNamingMode
+    AgentNamingMode,
+    PersonalityMode,
+    isPersonalityMode
 } from '../state/settings.js';
 import { listAvailableModels, ModelChoiceMetadata } from '../models/catalog.js';
 import { listRunningRuns, saveRun, updateRun, RunRecord } from '../state/runs.js';
@@ -84,6 +89,7 @@ import {
 import { renderChatCard } from './chatCard.js';
 import { collectDiscordContext, collectTargetChannelContext, withDiscordContext } from './context.js';
 import { FileExplorerEntry, renderFileExplorerCard } from './fileExplorerCard.js';
+import { renderFileTransferCard } from './fileTransferCard.js';
 import { renderFinalResponseCards } from './finalResponseCard.js';
 import { createInitPrompt } from './initPrompt.js';
 import { renderMcpCard } from './mcpCard.js';
@@ -131,6 +137,7 @@ type QueuedSteer = PendingSteer & { noticeChannelId: string };
 type PendingAccess = { target: ResponseTarget; conversationKey: string; prompt: string; options: PromptOptions };
 type PendingLimit = { retry: LimitRetry; expiresAt: number };
 type DashboardView = { components: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[]; files: AttachmentBuilder[] };
+type CardEditPayload = DashboardView & { content: string; embeds: []; attachments: [] };
 type ResponseCardSession = {
     id: string;
     createdAt: number;
@@ -170,6 +177,8 @@ const MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
 const MODEL_BUTTON_ID = 'discode:model-panel';
 const REASONING_BUTTON_ID = 'discode:reasoning-panel';
 const MODEL_SELECT_ID = 'discode:set-model';
+const MODEL_CUSTOM_BUTTON_ID = 'discode:custom-model';
+const MODEL_CUSTOM_MODAL_ID = 'discode:custom-model-modal';
 const REASONING_SELECT_ID = 'discode:set-reasoning';
 const PROVIDER_SELECT_ID = 'discode:set-provider';
 const PROVIDER_PRIORITY_SELECT_ID = 'discode:set-provider-priority';
@@ -188,6 +197,14 @@ const FAILOVER_SELECT_ID = 'discode:set-failover';
 const AGENT_NAMING_SELECT_ID = 'discode:set-agent-naming';
 const AGENT_NAMES_BUTTON_ID = 'discode:agent-names';
 const AGENT_NAMES_MODAL_ID = 'discode:agent-names-modal';
+const MEMORY_ENABLED_SELECT_ID = 'discode:set-memory-enabled';
+const MEMORY_BUTTON_ID = 'discode:edit-memory';
+const MEMORY_MODAL_ID = 'discode:memory-modal';
+const PERSONALITY_SELECT_ID = 'discode:set-personality';
+const PERSONALITY_BUTTON_ID = 'discode:edit-personality';
+const PERSONALITY_MODAL_ID = 'discode:personality-modal';
+const CUSTOM_INSTRUCTIONS_BUTTON_ID = 'discode:edit-custom-instructions';
+const CUSTOM_INSTRUCTIONS_MODAL_ID = 'discode:custom-instructions-modal';
 const ADD_ACCOUNT_BUTTON_ID = 'discode:add-account';
 const ADD_ACCOUNT_PROVIDER_SELECT_ID = 'discode:add-account-provider';
 const ADD_ACCOUNT_MODAL_ID = 'discode:add-account-modal';
@@ -245,7 +262,15 @@ const permissionChoices: { label: string; value: PermissionMode; description: st
     { label: 'Directory Only', value: 'directory', description: 'Ask before elevated access.' },
     { label: 'Auto-Review', value: 'auto-review', description: 'Run read-only by default.' }
 ];
-const settingsPages: SettingsPage[] = ['runtime', 'access', 'notifications', 'display', 'failover'];
+const settingsPages: SettingsPage[] = ['runtime', 'access', 'notifications', 'display', 'failover', 'memory', 'personality'];
+const personalityChoices: { label: string; value: PersonalityMode; description: string }[] = [
+    { label: 'Default', value: 'default', description: 'Use the provider default plus Discode guidance.' },
+    { label: 'Direct', value: 'direct', description: 'Pragmatic, clear, and low-fluff.' },
+    { label: 'Concise', value: 'concise', description: 'Short, high-signal responses.' },
+    { label: 'Thorough', value: 'thorough', description: 'More detail, verification, and tradeoffs.' },
+    { label: 'Friendly', value: 'friendly', description: 'Warmer wording while staying precise.' },
+    { label: 'Custom', value: 'custom', description: 'Use your custom personality text.' }
+];
 const idleProgressLabels = [
     'Thinking through the next step',
     'Checking the shape of the task',
@@ -398,7 +423,7 @@ export class DiscordCodexBridge {
                 await interaction.editReply(`Opened ${thread.url}`);
                 const statusMessage = await this.sendThinkingMessage(thread, `Starting ${chatName}`);
                 const discordContext = await collectDiscordContext(interaction, interaction.client, prompt);
-                const codexPrompt = this.withPromptGuidance(withDiscordContext(prompt, discordContext), tools);
+                const codexPrompt = this.withPromptGuidance(withDiscordContext(prompt, discordContext), tools, settings);
                 await this.runPrompt(statusMessage, thread.id, codexPrompt, {
                     fresh: true,
                     workspace: project.workspace,
@@ -416,7 +441,7 @@ export class DiscordCodexBridge {
 
             await interaction.deferReply(await this.getSlashReplyOptions());
             const discordContext = await collectDiscordContext(interaction, interaction.client, prompt);
-            const codexPrompt = this.withPromptGuidance(withDiscordContext(prompt, discordContext), tools);
+            const codexPrompt = this.withPromptGuidance(withDiscordContext(prompt, discordContext), tools, settings);
             await this.runPrompt(interaction, interaction.channelId, codexPrompt, {
                 fresh: subcommand === 'new' || interaction.options.getBoolean('new') === true,
                 workspace: project.workspace,
@@ -443,7 +468,7 @@ export class DiscordCodexBridge {
                 image?.url ? `Source image: ${image.url}` : ''
             ].filter(Boolean).join('\n');
 
-            await this.runPrompt(interaction, interaction.channelId, this.withPromptGuidance(request), {
+            await this.runPrompt(interaction, interaction.channelId, this.withPromptGuidance(request, parseToolTags(request), settings), {
                 fresh: false,
                 workspace: project.workspace,
                 model: selectedModel,
@@ -469,7 +494,7 @@ export class DiscordCodexBridge {
             await this.runReview(interaction, {
                 scope,
                 ref: interaction.options.getString('ref'),
-                instructions: this.withPromptGuidance(withDiscordContext(instructions || 'Review the requested diff.', discordContext), tools),
+                instructions: this.withPromptGuidance(withDiscordContext(instructions || 'Review the requested diff.', discordContext), tools, settings),
                 workspace: project.workspace,
                 model: selectedModel,
                 permissionMode: permissionMode === 'auto-review' ? 'auto-review' : undefined,
@@ -499,7 +524,7 @@ export class DiscordCodexBridge {
                 const thread = await this.createThread(interaction.channel as TextChannel, chatName);
                 await interaction.editReply(`Opened ${thread.url}`);
                 const statusMessage = await this.sendThinkingMessage(thread, `Starting ${chatName}`);
-                const codexPrompt = this.withPromptGuidance(await this.createTriagePrompt(interaction.client, targetChannel.id, limit, focus), tools);
+                const codexPrompt = this.withPromptGuidance(await this.createTriagePrompt(interaction.client, targetChannel.id, limit, focus), tools, settings);
                 await this.runPrompt(statusMessage, thread.id, codexPrompt, {
                     fresh: true,
                     workspace: project.workspace,
@@ -516,7 +541,7 @@ export class DiscordCodexBridge {
             }
 
             await interaction.deferReply(await this.getSlashReplyOptions());
-            const codexPrompt = this.withPromptGuidance(await this.createTriagePrompt(interaction.client, targetChannel.id, limit, focus), tools);
+            const codexPrompt = this.withPromptGuidance(await this.createTriagePrompt(interaction.client, targetChannel.id, limit, focus), tools, settings);
             await this.runPrompt(interaction, interaction.channelId, codexPrompt, {
                 workspace: project.workspace,
                 model: selectedModel,
@@ -568,7 +593,7 @@ export class DiscordCodexBridge {
         const provider = getEffectiveProvider(settings, this.config.defaultProvider);
         const permissionMode = getEffectivePermissionMode(settings, this.config.defaultPermissionMode);
         const tools = parseToolTags(interaction.options.getString('tools'));
-        const prompt = this.withPromptGuidance(createInitPrompt(project.workspace), tools);
+        const prompt = this.withPromptGuidance(createInitPrompt(project.workspace), tools, settings);
         const chatName = 'Initialize workspace';
         const shouldCreateThread = Boolean(interaction.guild && interaction.channel && !interaction.channel.isThread());
 
@@ -624,6 +649,11 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.isButton() && interaction.customId === MODEL_CUSTOM_BUTTON_ID) {
+            await interaction.showModal(await this.createCustomModelModal());
+            return;
+        }
+
         if (interaction.isButton() && interaction.customId === TOKEN_STATS_BUTTON_ID) {
             await this.showTokenStats(interaction, interaction.channelId);
             return;
@@ -636,6 +666,21 @@ export class DiscordCodexBridge {
 
         if (interaction.isButton() && interaction.customId === AGENT_NAMES_BUTTON_ID) {
             await interaction.showModal(await this.createAgentNamesModal());
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId === MEMORY_BUTTON_ID) {
+            await interaction.showModal(await this.createMemoryModal());
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId === PERSONALITY_BUTTON_ID) {
+            await interaction.showModal(await this.createPersonalityModal());
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId === CUSTOM_INSTRUCTIONS_BUTTON_ID) {
+            await interaction.showModal(await this.createCustomInstructionsModal());
             return;
         }
 
@@ -678,7 +723,6 @@ export class DiscordCodexBridge {
         }
 
         if (interaction.isButton() && interaction.customId.startsWith(FILE_EXPLORER_ZIP_ID)) {
-            await interaction.deferUpdate();
             const sessionId = interaction.customId.split(':').at(-1) || '';
 
             await this.sendDirectoryZip(interaction, sessionId);
@@ -822,6 +866,22 @@ export class DiscordCodexBridge {
                 await updateBridgeSettings({ agentNamingMode: selected });
             }
             await this.updateSettingsDashboard(interaction, 'display');
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId === MEMORY_ENABLED_SELECT_ID) {
+            await updateBridgeSettings({ memoryEnabled: interaction.values[0] === 'on' });
+            await this.updateSettingsDashboard(interaction, 'memory');
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId === PERSONALITY_SELECT_ID) {
+            const selected = interaction.values[0];
+
+            if (isPersonalityMode(selected)) {
+                await updateBridgeSettings({ personalityMode: selected });
+            }
+            await this.updateSettingsDashboard(interaction, 'personality');
             return;
         }
 
@@ -1048,6 +1108,14 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.customId === MODEL_CUSTOM_MODAL_ID) {
+            const model = interaction.fields.getTextInputValue('model').trim();
+
+            await updateBridgeSettings({ model: model || null });
+            await this.showSettingsDashboard(interaction, 'runtime');
+            return;
+        }
+
         if (interaction.customId === TERMINAL_RUN_MODAL_ID) {
             const project = await this.resolveProject();
             const command = interaction.fields.getTextInputValue('command').trim();
@@ -1089,6 +1157,32 @@ export class DiscordCodexBridge {
                 customAgentNames
             });
             await this.showSettingsDashboard(interaction, 'display');
+            return;
+        }
+
+        if (interaction.customId === MEMORY_MODAL_ID) {
+            await updateBridgeSettings({
+                memoryEnabled: true,
+                memories: interaction.fields.getTextInputValue('memories').trim()
+            });
+            await this.showSettingsDashboard(interaction, 'memory');
+            return;
+        }
+
+        if (interaction.customId === PERSONALITY_MODAL_ID) {
+            await updateBridgeSettings({
+                personalityMode: 'custom',
+                customPersonality: interaction.fields.getTextInputValue('personality').trim()
+            });
+            await this.showSettingsDashboard(interaction, 'personality');
+            return;
+        }
+
+        if (interaction.customId === CUSTOM_INSTRUCTIONS_MODAL_ID) {
+            await updateBridgeSettings({
+                customInstructions: interaction.fields.getTextInputValue('instructions').trim()
+            });
+            await this.showSettingsDashboard(interaction, 'personality');
             return;
         }
 
@@ -1240,7 +1334,8 @@ export class DiscordCodexBridge {
             naturalToolPrompt || withDiscordContext(request, await collectDiscordContext(message, client, request, {
                 includeCurrentChannel: shouldIncludeDiscordThreadContext
             })),
-            parseToolTags(request)
+            parseToolTags(request),
+            settings
         );
 
         if (message.guild && !message.channel.isThread()) {
@@ -1892,8 +1987,26 @@ export class DiscordCodexBridge {
         ].join('\n');
     }
 
-    private withPromptGuidance(prompt: string, tools = parseToolTags(prompt)): string {
-        return this.withSubagentGuidance(this.withImageGenerationGuidance(this.withRobloxMcpGuidance(withToolTagGuidance(prompt, tools))));
+    private withPersonalizationGuidance(prompt: string, settings?: Awaited<ReturnType<typeof getBridgeSettings>>): string {
+        if (!settings) return prompt;
+        const personality = getEffectivePersonalityText(settings);
+        const memories = getEffectiveMemoryText(settings);
+        const customInstructions = getEffectiveCustomInstructions(settings);
+        const sections = [
+            prompt,
+            personality ? ['Personalization:', personality].join('\n') : '',
+            customInstructions ? ['Custom instructions:', customInstructions].join('\n') : '',
+            memories ? ['Persistent memory:', memories].join('\n') : ''
+        ].filter(Boolean);
+
+        return sections.join('\n\n');
+    }
+
+    private withPromptGuidance(prompt: string, tools = parseToolTags(prompt), settings?: Awaited<ReturnType<typeof getBridgeSettings>>): string {
+        return this.withPersonalizationGuidance(
+            this.withSubagentGuidance(this.withImageGenerationGuidance(this.withRobloxMcpGuidance(withToolTagGuidance(prompt, tools)))),
+            settings
+        );
     }
 
     private isPublishRequest(prompt: string): boolean {
@@ -2469,38 +2582,133 @@ export class DiscordCodexBridge {
         const session = fileExplorerSessions.get(sessionId);
 
         if (!session) {
-            await interaction.followUp({ content: 'That file explorer session expired.', flags: MessageFlags.Ephemeral }).catch(() => undefined);
+            await interaction.reply({ content: 'That file explorer session expired.', flags: MessageFlags.Ephemeral }).catch(() => undefined);
             return;
         }
         const tempDir = await mkdtemp(path.join(os.tmpdir(), 'discode-zip-'));
         const archivePath = path.join(tempDir, `${this.cleanFileName(path.basename(session.cwd) || 'directory')}.zip`);
 
         try {
-            await execFileAsync('zip', ['-rq', archivePath, '.'], {
+            await interaction.update(await this.createZipStatusPayload(session, 'Preparing archive', 'Collecting files and applying codebase exclusions.', 'working'));
+            await interaction.editReply(await this.createZipStatusPayload(session, 'Compressing directory', 'Skipping .git, dependencies, build output, local data, and env files.', 'working'));
+            await execFileAsync('zip', [
+                '-rq',
+                archivePath,
+                '.',
+                '-x',
+                '.git/*',
+                'node_modules/*',
+                'dist/*',
+                'build/*',
+                '.next/*',
+                'coverage/*',
+                'data/*',
+                '.env',
+                '.env.*'
+            ], {
                 cwd: session.cwd,
-                timeout: 60 * 1000,
+                timeout: 5 * 60 * 1000,
                 maxBuffer: 128 * 1024
             });
+            await interaction.editReply(await this.createZipStatusPayload(session, 'Checking archive size', 'Preparing Discord attachments.', 'working'));
             const stats = statSync(archivePath, { throwIfNoEntry: false });
 
-            if (!stats?.isFile() || stats.size > MAX_ATTACHMENT_BYTES) {
-                await interaction.followUp({
-                    content: `The zip is too large to send (${stats ? this.formatBytes(stats.size) : 'unknown size'}).`,
-                    flags: MessageFlags.Ephemeral
-                });
+            if (!stats?.isFile()) {
+                await interaction.editReply(await this.createZipStatusPayload(session, 'Archive failed', 'Zip did not produce a readable archive.', 'error'));
                 return;
             }
-            await interaction.followUp({
-                content: `Zipped \`${this.shortenPathTarget(session.cwd)}\`.`,
-                files: [new AttachmentBuilder(archivePath, { name: path.basename(archivePath) })]
-            });
+            if (stats.size <= MAX_ATTACHMENT_BYTES) {
+                await interaction.editReply(await this.createZipStatusPayload(session, 'Sending archive', `${this.formatBytes(stats.size)} ready to send.`, 'working', stats.size));
+                await interaction.followUp({
+                    content: `Zipped \`${this.shortenPathTarget(session.cwd)}\`.`,
+                    files: [new AttachmentBuilder(archivePath, { name: path.basename(archivePath) })]
+                });
+                await interaction.editReply(await this.createZipStatusPayload(session, 'Archive sent', `${this.formatBytes(stats.size)} sent as one zip file.`, 'done', stats.size));
+                return;
+            }
+
+            await interaction.editReply(await this.createZipStatusPayload(session, 'Splitting large archive', `${this.formatBytes(stats.size)} is over Discord's single-file limit.`, 'working', stats.size));
+            const parts = await this.splitArchive(archivePath, tempDir);
+
+            if (parts.length === 0) {
+                await interaction.editReply(await this.createZipStatusPayload(session, 'Archive too large', 'Could not split this archive into sendable chunks.', 'error', stats.size));
+                return;
+            }
+            if (parts.length > 25) {
+                await interaction.editReply(await this.createZipStatusPayload(session, 'Archive too large', `${parts.length} chunks would be required after exclusions.`, 'warning', stats.size));
+                return;
+            }
+            await interaction.editReply(await this.createZipStatusPayload(session, 'Sending archive chunks', `${parts.length} chunks. Rejoin them with cat before opening.`, 'working', stats.size));
+            await this.sendArchiveParts(interaction, session.cwd, parts);
+            await interaction.editReply(await this.createZipStatusPayload(session, 'Archive chunks sent', `${parts.length} chunks sent.`, 'done', stats.size));
         } catch (error) {
-            await interaction.followUp({
-                content: `Could not zip this directory.\n\n${this.trimError(error instanceof Error ? error.message : String(error))}`,
-                flags: MessageFlags.Ephemeral
-            });
+            const message = `Could not zip this directory.\n\n${this.trimError(error instanceof Error ? error.message : String(error))}`;
+
+            if (interaction.deferred || interaction.replied) {
+                await interaction.editReply(await this.createZipStatusPayload(session, 'Archive failed', message, 'error')).catch(() => undefined);
+            } else {
+                await interaction.reply({ content: message, flags: MessageFlags.Ephemeral }).catch(() => undefined);
+            }
         } finally {
             await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+    }
+
+    private async createZipStatusPayload(session: FileExplorerSession, status: string, detail: string, tone: 'working' | 'done' | 'warning' | 'error', size?: number): Promise<CardEditPayload> {
+        const image = await renderFileTransferCard({
+            title: 'Directory Zip',
+            status,
+            detail,
+            path: session.cwd,
+            size: size === undefined ? undefined : this.formatBytes(size),
+            tone
+        });
+
+        return {
+            content: '',
+            embeds: [],
+            attachments: [],
+            components: [],
+            files: [new AttachmentBuilder(image, { name: `${this.commandName}-zip-status.png` })]
+        };
+    }
+
+    private async splitArchive(archivePath: string, tempDir: string): Promise<string[]> {
+        const prefix = path.join(tempDir, `${path.basename(archivePath)}.part-`);
+
+        await execFileAsync('split', ['-b', `${MAX_ATTACHMENT_BYTES - 512 * 1024}`, '-d', '-a', '3', archivePath, prefix], {
+            timeout: 2 * 60 * 1000,
+            maxBuffer: 128 * 1024
+        });
+        const files = await readdir(tempDir);
+
+        return files
+            .filter(name => name.startsWith(path.basename(prefix)))
+            .sort()
+            .map(name => path.join(tempDir, name))
+            .filter(filePath => {
+                const stats = statSync(filePath, { throwIfNoEntry: false });
+
+                return Boolean(stats?.isFile() && stats.size <= MAX_ATTACHMENT_BYTES);
+            });
+    }
+
+    private async sendArchiveParts(interaction: ButtonInteraction, directory: string, parts: string[]): Promise<void> {
+        const base = `${this.cleanFileName(path.basename(directory) || 'directory')}.zip`;
+        const instructions = [
+            `Zipped \`${this.shortenPathTarget(directory)}\` into ${parts.length} chunks.`,
+            `Rejoin on macOS/Linux with: \`cat ${base}.part-* > ${base}\``
+        ].join('\n');
+
+        for (let index = 0; index < parts.length; index += 10) {
+            const chunk = parts.slice(index, index + 10);
+
+            await interaction.followUp({
+                content: index === 0 ? instructions : `Archive chunks ${index + 1}-${index + chunk.length}/${parts.length}.`,
+                files: chunk.map((part, partIndex) => new AttachmentBuilder(part, {
+                    name: `${base}.part-${String(index + partIndex).padStart(3, '0')}`
+                }))
+            });
         }
     }
 
@@ -3273,6 +3481,8 @@ export class DiscordCodexBridge {
         const finalResponsesAsImages = getEffectiveFinalResponsesAsImages(settings);
         const autoSwitchOnLimit = getEffectiveAutoSwitchOnLimit(settings, this.config.autoSwitchOnLimit);
         const agentNamingMode: AgentNamingMode = settings.agentNamingMode === 'custom' ? 'custom' : 'greek';
+        const personalityMode: PersonalityMode = isPersonalityMode(settings.personalityMode) ? settings.personalityMode : 'default';
+        const memoryEnabled = settings.memoryEnabled !== false;
         const modelOptions = listModelChoices().map(choice => ({
             label: choice.name.slice(0, 100),
             value: choice.value,
@@ -3427,6 +3637,62 @@ export class DiscordCodexBridge {
             ];
         }
 
+        if (page === 'memory') {
+            return [
+                pageRow,
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(MEMORY_ENABLED_SELECT_ID)
+                        .setPlaceholder(`Memory: ${memoryEnabled ? 'On' : 'Off'}`)
+                        .addOptions([
+                            { label: 'On', value: 'on', description: 'Include saved memory in future prompts.', default: memoryEnabled },
+                            { label: 'Off', value: 'off', description: 'Keep memory saved but do not include it.', default: !memoryEnabled }
+                        ])
+                ),
+                new ActionRowBuilder<ButtonBuilder>().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(MEMORY_BUTTON_ID)
+                        .setLabel('Edit memory')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId(CUSTOM_INSTRUCTIONS_BUTTON_ID)
+                        .setLabel('Edit instructions')
+                        .setStyle(ButtonStyle.Secondary)
+                )
+            ];
+        }
+
+        if (page === 'personality') {
+            return [
+                pageRow,
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(PERSONALITY_SELECT_ID)
+                        .setPlaceholder(`Personality: ${this.capitalize(personalityMode)}`)
+                        .addOptions(personalityChoices.map(choice => ({
+                            label: choice.label,
+                            value: choice.value,
+                            description: choice.description,
+                            default: choice.value === personalityMode
+                        })))
+                ),
+                new ActionRowBuilder<ButtonBuilder>().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(PERSONALITY_BUTTON_ID)
+                        .setLabel('Edit personality')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId(CUSTOM_INSTRUCTIONS_BUTTON_ID)
+                        .setLabel('Edit instructions')
+                        .setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder()
+                        .setCustomId(AGENT_NAMES_BUTTON_ID)
+                        .setLabel('Edit agent names')
+                        .setStyle(ButtonStyle.Secondary)
+                )
+            ];
+        }
+
         return [
             pageRow,
             new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
@@ -3442,19 +3708,6 @@ export class DiscordCodexBridge {
             ),
             new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
                 new StringSelectMenuBuilder()
-                    .setCustomId(PROVIDER_PRIORITY_SELECT_ID)
-                    .setPlaceholder('Fallback priority')
-                    .setMinValues(1)
-                    .setMaxValues(providerChoices.length)
-                    .addOptions(providerChoices.map(choice => ({
-                        label: choice.label,
-                        value: choice.value,
-                        description: choice.description,
-                        default: providerPriority.includes(choice.value)
-                    })))
-            ),
-            new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-                new StringSelectMenuBuilder()
                     .setCustomId(MODEL_SELECT_ID)
                     .setPlaceholder(`Model: ${model}`)
                     .addOptions(modelOptions.slice(0, 25))
@@ -3464,6 +3717,12 @@ export class DiscordCodexBridge {
                     .setCustomId(REASONING_SELECT_ID)
                     .setPlaceholder(`Reasoning: ${this.formatReasoning(reasoning)}`)
                     .addOptions(reasoningOptions)
+            ),
+            new ActionRowBuilder<ButtonBuilder>().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(MODEL_CUSTOM_BUTTON_ID)
+                    .setLabel('Edit model')
+                    .setStyle(ButtonStyle.Secondary)
             )
         ];
     }
@@ -3511,6 +3770,25 @@ export class DiscordCodexBridge {
                         .setCustomId('model')
                         .setLabel('Model')
                         .setStyle(TextInputStyle.Short)
+                        .setRequired(false)
+                )
+            );
+    }
+
+    private async createCustomModelModal(): Promise<ModalBuilder> {
+        const settings = await getBridgeSettings();
+        const model = settings.model || '';
+
+        return new ModalBuilder()
+            .setCustomId(MODEL_CUSTOM_MODAL_ID)
+            .setTitle('Model override')
+            .addComponents(
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('model')
+                        .setLabel('Model name, or blank for config default')
+                        .setStyle(TextInputStyle.Short)
+                        .setValue(model.slice(0, 100))
                         .setRequired(false)
                 )
             );
@@ -3613,6 +3891,60 @@ export class DiscordCodexBridge {
                         .setLabel('Names, comma separated')
                         .setStyle(TextInputStyle.Paragraph)
                         .setValue(names.join(', '))
+                        .setRequired(false)
+                )
+            );
+    }
+
+    private async createMemoryModal(): Promise<ModalBuilder> {
+        const settings = await getBridgeSettings();
+
+        return new ModalBuilder()
+            .setCustomId(MEMORY_MODAL_ID)
+            .setTitle('Persistent memory')
+            .addComponents(
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('memories')
+                        .setLabel('Saved memory for future prompts')
+                        .setStyle(TextInputStyle.Paragraph)
+                        .setValue((settings.memories || '').slice(0, 3900))
+                        .setRequired(false)
+                )
+            );
+    }
+
+    private async createPersonalityModal(): Promise<ModalBuilder> {
+        const settings = await getBridgeSettings();
+
+        return new ModalBuilder()
+            .setCustomId(PERSONALITY_MODAL_ID)
+            .setTitle('Custom personality')
+            .addComponents(
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('personality')
+                        .setLabel('Tone and response behavior')
+                        .setStyle(TextInputStyle.Paragraph)
+                        .setValue((settings.customPersonality || '').slice(0, 3900))
+                        .setRequired(false)
+                )
+            );
+    }
+
+    private async createCustomInstructionsModal(): Promise<ModalBuilder> {
+        const settings = await getBridgeSettings();
+
+        return new ModalBuilder()
+            .setCustomId(CUSTOM_INSTRUCTIONS_MODAL_ID)
+            .setTitle('Custom instructions')
+            .addComponents(
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('instructions')
+                        .setLabel('Always-on custom instructions')
+                        .setStyle(TextInputStyle.Paragraph)
+                        .setValue((settings.customInstructions || '').slice(0, 3900))
                         .setRequired(false)
                 )
             );

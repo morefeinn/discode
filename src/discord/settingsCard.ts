@@ -11,11 +11,14 @@ import {
     getEffectiveProvider,
     getEffectiveProviderPriority,
     getEffectiveReasoning,
-    getEffectiveSlashResponsesEphemeral
+    getEffectiveSlashResponsesEphemeral,
+    getEffectiveMemoryText,
+    getEffectivePersonalityText,
+    getEffectiveCustomInstructions
 } from '../state/settings.js';
 import { renderSvgToPng } from './rendering.js';
 
-export type SettingsPage = 'runtime' | 'access' | 'notifications' | 'display' | 'failover';
+export type SettingsPage = 'runtime' | 'access' | 'notifications' | 'display' | 'failover' | 'memory' | 'personality';
 
 const WIDTH = 1100;
 const HEIGHT = 620;
@@ -38,6 +41,10 @@ function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: Setting
     const autoSwitchOnLimit = getEffectiveAutoSwitchOnLimit(settings, config.autoSwitchOnLimit);
     const agentNaming = settings.agentNamingMode === 'custom' ? 'Custom' : 'Greek';
     const customAgentCount = settings.customAgentNames?.filter(Boolean).length || 0;
+    const memoryText = getEffectiveMemoryText(settings);
+    const personalityText = getEffectivePersonalityText(settings);
+    const customInstructions = getEffectiveCustomInstructions(settings);
+    const personalityMode = settings.personalityMode || 'default';
     const allowedUsers = mergeAllowedUsers(config.allowedUserIds, settings.allowedUserIds || []);
     const rows = page === 'runtime'
         ? [
@@ -71,13 +78,29 @@ function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: Setting
                     row('Button expiry', 'Disabled after 60 seconds', 406),
                     row('Slash responses', slashResponsesEphemeral ? 'Ephemeral' : 'Public', 486)
                     ]
-                    : [
+                    : page === 'failover'
+                        ? [
                         row('Limit rerouting', autoSwitchOnLimit ? 'On' : 'Off', 166),
                         row('Provider priority', providerPriority.map(label).join(' > '), 246),
                         row('Account ordering', 'Priority, then account order', 326),
                         row('On limit', 'Try next account, then fallback provider', 406),
                         row('Manual fallback', 'Usage limit cards still offer retry controls', 486)
-                    ];
+                        ]
+                        : page === 'memory'
+                            ? [
+                                row('Memory', settings.memoryEnabled === false ? 'Off' : 'On', 166),
+                                row('Saved notes', memoryText ? `${memoryText.split('\n').filter(Boolean).length} lines` : 'Empty', 246),
+                                row('Prompt scope', 'Included in agent prompts', 326),
+                                row('Storage', 'Local settings file', 406),
+                                row('Custom instructions', customInstructions ? `${customInstructions.length} chars` : 'Empty', 486)
+                            ]
+                            : [
+                                row('Personality', label(personalityMode), 166),
+                                row('Custom personality', personalityText ? `${personalityText.length} chars` : 'Default provider behavior', 246),
+                                row('Custom instructions', customInstructions ? `${customInstructions.length} chars` : 'None', 326),
+                                row('Agent names', agentNaming === 'Custom' ? `${customAgentCount} custom` : 'Greek roster', 406),
+                                row('Response format', finalResponsesAsImages ? 'Image cards' : 'Discord text', 486)
+                            ];
 
     return [
         `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">`,
@@ -104,6 +127,8 @@ function pageTitle(page: SettingsPage): string {
     if (page === 'access') return 'Access';
     if (page === 'display') return 'Display';
     if (page === 'failover') return 'Failover';
+    if (page === 'memory') return 'Memory';
+    if (page === 'personality') return 'Personality';
 
     return 'Notifications';
 }
@@ -113,6 +138,8 @@ function pageDescription(page: SettingsPage): string {
     if (page === 'access') return 'Access, sandbox, and publishing.';
     if (page === 'display') return 'Cards, response format, agent names, and interactive controls.';
     if (page === 'failover') return 'Limit handling, account priority, and provider fallback.';
+    if (page === 'memory') return 'Persistent local context injected into agent prompts.';
+    if (page === 'personality') return 'Tone, custom instructions, and response behavior.';
 
     return 'Privacy, pings, failover, and Discord scope.';
 }
