@@ -48,11 +48,11 @@ function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: Setting
     const allowedUsers = mergeAllowedUsers(config.allowedUserIds, settings.allowedUserIds || []);
     const rows = page === 'runtime'
         ? [
-            row('Provider', label(provider), 166),
+            row('Wrapper', label(provider), 166),
             row('Model', model, 246),
             row('Reasoning', label(reasoning), 326),
-            row('Priority', providerPriority.map(label).join(' > '), 406),
-            row('Wrapper', wrapperLabel(provider, config), 486)
+            row('Response style', finalResponsesAsImages ? 'Image cards' : 'Discord text', 406),
+            row('Executable', wrapperLabel(provider, config), 486)
         ]
         : page === 'access'
             ? [

@@ -223,6 +223,7 @@ const USAGE_PREV_ID = 'discode:usage-prev';
 const USAGE_NEXT_ID = 'discode:usage-next';
 const USAGE_ACTIVATE_ACCOUNT_ID = 'discode:usage-activate-account';
 const WORKSPACE_SELECT_ID = 'discode:set-workspace';
+const THREAD_WORKSPACE_SELECT_ID = 'discode:thread-workspace';
 const WORKSPACE_ADD_BUTTON_ID = 'discode:add-workspace';
 const WORKSPACE_ADD_MODAL_ID = 'discode:add-workspace-modal';
 const FILE_EXPLORER_BUTTON_ID = 'discode:file-explorer';
@@ -955,6 +956,33 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.isStringSelectMenu() && interaction.customId === THREAD_WORKSPACE_SELECT_ID) {
+            await interaction.deferUpdate();
+            const project = interaction.values[0] === '__default_workspace__'
+                ? await saveProject({ name: 'Default', workspace: this.config.defaultWorkspace, model: this.config.defaultModel })
+                : await setActiveProject(interaction.values[0]);
+            const channelId = interaction.channelId;
+            const existing = await getConversation(channelId);
+
+            await saveConversation({
+                discordChannelId: channelId,
+                discordGuildId: interaction.guildId || existing?.discordGuildId || null,
+                discordThreadId: interaction.channel?.isThread() ? channelId : existing?.discordThreadId || null,
+                latestMessageId: existing?.latestMessageId || interaction.message.id,
+                codexThreadId: existing?.codexThreadId || '',
+                name: existing?.name || this.getChatName(interaction.channel?.isThread() ? interaction.channel.name : 'New conversation'),
+                workspace: project.workspace,
+                model: project.model || null,
+                updatedAt: new Date().toISOString()
+            });
+            await interaction.editReply({
+                content: `Project set to **${project.name}**. Send the first prompt in this thread when ready.`,
+                components: [await this.createThreadWorkspaceRow(project.name)]
+            });
+            this.scheduleComponentExpiry(interaction.message, true);
+            return;
+        }
+
         if (interaction.isStringSelectMenu() && interaction.customId === MODEL_SELECT_ID) {
             await updateBridgeSettings({ model: interaction.values[0] === DEFAULT_MODEL_CHOICE ? null : interaction.values[0] });
             await this.updateSettingsDashboard(interaction, 'runtime');
@@ -1305,6 +1333,10 @@ export class DiscordCodexBridge {
         const request = this.getMessageRequest(message, prompt);
 
         if (!request) {
+            if (message.guild && prompt !== null && !message.channel.isThread()) {
+                await this.startEmptyConversationThread(message);
+                return true;
+            }
             await message.reply('Send a prompt after the mention.');
             return true;
         }
@@ -2035,6 +2067,58 @@ export class DiscordCodexBridge {
         return this.createTriagePrompt(client, targetChannelId, 35, request);
     }
 
+    private async startEmptyConversationThread(message: Message): Promise<void> {
+        if (!message.guild || message.channel.isThread()) return;
+        const project = await this.resolveProject();
+        const thread = await this.createThread(message.channel as TextChannel, `${this.botName} conversation`);
+
+        await saveConversation({
+            discordChannelId: thread.id,
+            discordGuildId: message.guildId || null,
+            discordThreadId: thread.id,
+            latestMessageId: null,
+            codexThreadId: '',
+            name: this.getChatName(thread.name),
+            workspace: project.workspace,
+            model: project.model || null,
+            updatedAt: new Date().toISOString()
+        });
+        await message.reply(`Opened ${thread.url}`);
+        const setupMessage = await thread.send({
+            content: `Choose the project for this conversation, then send the first prompt here.`,
+            components: [await this.createThreadWorkspaceRow(project.workspace)]
+        });
+        this.scheduleComponentExpiry(setupMessage, true);
+    }
+
+    private async createThreadWorkspaceRow(activeValue?: string): Promise<ActionRowBuilder<StringSelectMenuBuilder>> {
+        const { activeProjectName, projects } = await listProjects();
+        const activeProject = activeValue ? await findProject(activeValue) : null;
+        const activeName = activeProject?.name.trim().toLowerCase() || activeProjectName || '';
+        const options = projects.slice(0, 25).map((project, index) => ({
+            label: `${index + 1}. ${project.name}`.slice(0, 100),
+            value: project.name,
+            description: this.shortenPathTarget(project.workspace).slice(0, 100),
+            default: project.name.trim().toLowerCase() === activeName
+        }));
+
+        if (options.length === 0) {
+            options.push({
+                label: 'Default workspace',
+                value: '__default_workspace__',
+                description: this.shortenPathTarget(this.config.defaultWorkspace).slice(0, 100),
+                default: true
+            });
+        }
+
+        return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId(THREAD_WORKSPACE_SELECT_ID)
+                .setPlaceholder('Project for this conversation')
+                .addOptions(options)
+        );
+    }
+
     private async showConversationPicker(interaction: ChatInputCommandInteraction): Promise<void> {
         const conversations = await listConversations();
 
@@ -2308,7 +2392,7 @@ export class DiscordCodexBridge {
         }
         const pageCount = Math.max(1, session.pages.length);
         const normalizedPage = Math.min(Math.max(page, 0), pageCount - 1);
-        const models = session.pages[normalizedPage] || [];
+        const models = (session.pages[normalizedPage] || []).filter(model => model.value !== DEFAULT_MODEL_CHOICE);
 
         session.createdAt = Date.now();
 
@@ -2344,7 +2428,11 @@ export class DiscordCodexBridge {
                         .setCustomId(`${MODEL_PICKER_NEXT_ID}:${sessionId}:${Math.min(pageCount - 1, normalizedPage + 1)}`)
                         .setLabel('Next')
                         .setStyle(ButtonStyle.Secondary)
-                        .setDisabled(normalizedPage >= pageCount - 1)
+                        .setDisabled(normalizedPage >= pageCount - 1),
+                    new ButtonBuilder()
+                        .setCustomId(MODEL_CUSTOM_BUTTON_ID)
+                        .setLabel('Custom model')
+                        .setStyle(ButtonStyle.Secondary)
                 )
             ]
         };
@@ -2354,18 +2442,32 @@ export class DiscordCodexBridge {
         try {
             const catalog = await listAvailableModels(provider);
 
-            if (catalog.length > 0) return catalog;
+            if (catalog.length > 0) return this.uniqueModelChoices(catalog);
         } catch (error) {
             console.warn('Failed to read model catalog:', error);
         }
 
-        return listModelChoices().map(choice => ({
+        return this.uniqueModelChoices(listModelChoices().map(choice => ({
             name: choice.name,
             value: choice.value,
             provider: provider === 'codex' ? 'Codex' : this.capitalize(provider),
             reasoning: false,
             toolCall: false
-        }));
+        })));
+    }
+
+    private uniqueModelChoices(models: ModelChoiceMetadata[]): ModelChoiceMetadata[] {
+        const seen = new Set<string>();
+
+        return models.filter(model => {
+            const value = model.value.slice(0, 100);
+
+            if (seen.has(value)) return false;
+            seen.add(value);
+            model.value = value;
+
+            return true;
+        });
     }
 
     private chunkModels(models: ModelChoiceMetadata[], size: number): ModelChoiceMetadata[][] {
@@ -3483,9 +3585,14 @@ export class DiscordCodexBridge {
         const agentNamingMode: AgentNamingMode = settings.agentNamingMode === 'custom' ? 'custom' : 'greek';
         const personalityMode: PersonalityMode = isPersonalityMode(settings.personalityMode) ? settings.personalityMode : 'default';
         const memoryEnabled = settings.memoryEnabled !== false;
-        const modelOptions = listModelChoices().map(choice => ({
+        const modelChoices = await this.getModelChoices(provider);
+        const modelOptions = [
+            { name: 'Config default', value: DEFAULT_MODEL_CHOICE, provider: 'Config', reasoning: false, toolCall: false },
+            ...modelChoices.filter(choice => choice.value !== DEFAULT_MODEL_CHOICE)
+        ].map(choice => ({
             label: choice.name.slice(0, 100),
             value: choice.value,
+            description: `${choice.provider}${choice.reasoning ? ' · reasoning' : ''}${choice.toolCall ? ' · tools' : ''}`.slice(0, 100),
             default: choice.value === DEFAULT_MODEL_CHOICE ? !settings.model : choice.value === model
         }));
         const reasoningOptions = reasoningChoices.map(choice => ({
@@ -3499,6 +3606,7 @@ export class DiscordCodexBridge {
             modelOptions.unshift({
                 label: model.slice(0, 100),
                 value: model,
+                description: 'Custom model override',
                 default: true
             });
         }
@@ -3698,7 +3806,7 @@ export class DiscordCodexBridge {
             new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
                 new StringSelectMenuBuilder()
                     .setCustomId(PROVIDER_SELECT_ID)
-                    .setPlaceholder(`Provider: ${this.capitalize(provider)}`)
+                    .setPlaceholder(`Wrapper: ${this.capitalize(provider)}`)
                     .addOptions(providerChoices.map(choice => ({
                         label: choice.label,
                         value: choice.value,
@@ -3718,11 +3826,14 @@ export class DiscordCodexBridge {
                     .setPlaceholder(`Reasoning: ${this.formatReasoning(reasoning)}`)
                     .addOptions(reasoningOptions)
             ),
-            new ActionRowBuilder<ButtonBuilder>().addComponents(
-                new ButtonBuilder()
-                    .setCustomId(MODEL_CUSTOM_BUTTON_ID)
-                    .setLabel('Edit model')
-                    .setStyle(ButtonStyle.Secondary)
+            new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                new StringSelectMenuBuilder()
+                    .setCustomId(FINAL_RESPONSE_SELECT_ID)
+                    .setPlaceholder(`Response style: ${finalResponsesAsImages ? 'Image cards' : 'Text'}`)
+                    .addOptions([
+                        { label: 'Image cards', value: 'images', description: 'Render final replies as paginated image cards.', default: finalResponsesAsImages },
+                        { label: 'Discord text', value: 'text', description: 'Send final replies as plain Discord markdown.', default: !finalResponsesAsImages }
+                    ])
             )
         ];
     }
@@ -4265,6 +4376,13 @@ export class DiscordCodexBridge {
             }
         }
 
+        const inferredProject = await this.inferProjectFromRequest(request);
+
+        if (inferredProject) {
+            await setActiveProject(inferredProject.name);
+            return inferredProject;
+        }
+
         if (explicitWorkspace) {
             const workspace = this.expandHomePath(explicitWorkspace);
             const name = this.cleanProjectName(newProjectName || namedProject || path.basename(workspace));
@@ -4282,6 +4400,29 @@ export class DiscordCodexBridge {
         }
 
         return null;
+    }
+
+    private async inferProjectFromRequest(request: string): Promise<{ name: string; workspace: string; model?: string | null } | null> {
+        const normalized = request.toLowerCase();
+        const { projects } = await listProjects();
+        const scored = projects
+            .map(project => {
+                const name = project.name.toLowerCase();
+                const base = path.basename(project.workspace).toLowerCase();
+                let score = 0;
+
+                if (normalized.includes(name)) score += 100 + name.length;
+                if (base && normalized.includes(base)) score += 80 + base.length;
+                for (const part of name.split(/[\s_.-]+/).filter(value => value.length >= 3)) {
+                    if (normalized.includes(part)) score += 15;
+                }
+
+                return { project, score };
+            })
+            .filter(item => item.score > 0)
+            .sort((left, right) => right.score - left.score);
+
+        return scored[0]?.project || null;
     }
 
     private cleanProjectName(value: string): string {

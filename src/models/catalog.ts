@@ -29,7 +29,7 @@ const cacheTtlMs = 24 * 60 * 60 * 1000;
 const modelsUrl = process.env.DISCODE_MODELS_URL?.trim() || 'https://models.dev/api.json';
 
 export async function listAvailableModels(provider: ProviderType, refresh = false): Promise<ModelChoiceMetadata[]> {
-    const providers = await readModelsDev(refresh);
+    const providers: Record<string, ModelsDevProvider> = await readModelsDev(refresh).catch(() => ({}));
     const providerIds = providerIdsFor(provider, providers);
     const values: ModelChoiceMetadata[] = [];
 
@@ -51,7 +51,8 @@ export async function listAvailableModels(provider: ProviderType, refresh = fals
         }
     }
 
-    return values.sort((left, right) => score(right) - score(left) || left.name.localeCompare(right.name));
+    return (values.length > 0 ? values : fallbackModels(provider))
+        .sort((left, right) => score(right) - score(left) || left.name.localeCompare(right.name));
 }
 
 async function readModelsDev(refresh: boolean): Promise<Record<string, ModelsDevProvider>> {
@@ -103,4 +104,23 @@ function score(model: ModelChoiceMetadata): number {
     if (value.includes('latest') || value.includes('5') || value.includes('4.5')) score += 10;
 
     return score;
+}
+
+function fallbackModels(provider: ProviderType): ModelChoiceMetadata[] {
+    const values: Record<ProviderType, string[]> = {
+        codex: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.2'],
+        opencode: ['openai/gpt-5.5', 'openai/gpt-5.4', 'anthropic/claude-sonnet-4-5', 'qwen/qwen3-coder-plus', 'z-ai/glm-4.6'],
+        anthropic: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5'],
+        zai: ['glm-4.6', 'glm-4.5'],
+        qwen: ['qwen3-coder-plus', 'qwen3-max', 'qwen3-plus'],
+        custom: []
+    };
+
+    return (values[provider] || values.codex).map(value => ({
+        name: value,
+        value,
+        provider: provider === 'custom' ? 'Custom' : provider,
+        reasoning: /gpt-5|claude|glm|qwen3/i.test(value),
+        toolCall: provider !== 'custom'
+    }));
 }
