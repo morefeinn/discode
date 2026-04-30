@@ -16,6 +16,18 @@ const color = (value: string, code: string): string => colorEnabled ? `${code}${
 const ok = (value: string): void => console.log(`${color('ok', '\x1b[32m')} ${value}`);
 const info = (value: string): void => console.log(`${color('info', '\x1b[36m')} ${value}`);
 const warn = (value: string): void => console.warn(`${color('warn', '\x1b[33m')} ${value}`);
+const stripAnsi = (value: string): string => value.replace(/\x1b\[[0-9;]*m/g, '');
+const row = (label: string, value: string): string => `${color(label.padEnd(14), '\x1b[90m')} ${value}`;
+
+function panel(title: string, rows: string[]): void {
+    const width = Math.max(stripAnsi(title).length, ...rows.map(item => stripAnsi(item).length), 28);
+
+    console.log(color(`+-- ${title} ${'-'.repeat(Math.max(0, width - stripAnsi(title).length - 1))}+`, '\x1b[36m'));
+    for (const item of rows) {
+        console.log(`| ${item}${' '.repeat(Math.max(0, width - stripAnsi(item).length))} |`);
+    }
+    console.log(color(`+${'-'.repeat(width + 2)}+`, '\x1b[36m'));
+}
 
 if (!config.token) {
     throw new Error('DISCORD_TOKEN is required. Add it to .env or the process environment.');
@@ -48,11 +60,12 @@ client.once(Events.ClientReady, async () => {
     try {
         const registered = await registerSlashCommands(config, botName, [...client.guilds.cache.keys()]);
         bridge.setBotIdentity(botName, registered.primaryName);
-        console.log(color(`\nDiscode ${packageJson.version || ''}`.trim(), '\x1b[1m'));
-        ok(`gateway connected as ${client.user?.tag}`);
-        info(`command /${registered.primaryName}`);
-        info(`providers ${await providerSummary()}`);
-        info(`usage ${formatNumber(readStoredTokenUsage())} tokens`);
+        panel(`Discode ${packageJson.version || ''}`.trim(), [
+            row('gateway', color(`connected as ${client.user?.tag}`, '\x1b[32m')),
+            row('command', `/${registered.primaryName}`),
+            row('harnesses', await providerSummary()),
+            row('usage', `${formatNumber(readStoredTokenUsage())} tokens`)
+        ]);
         const updateStatus = await checkForUpdate(process.cwd());
         const updateNotice = formatUpdateNotice(updateStatus);
 
