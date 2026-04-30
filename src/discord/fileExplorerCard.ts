@@ -21,7 +21,7 @@ export async function renderFileExplorerCard(data: FileExplorerCardData): Promis
 }
 
 function renderSvg(data: FileExplorerCardData): string {
-    const rows = data.entries.slice(0, 12).map((entry, index) => row(entry, 178 + index * 42)).join('');
+    const rows = data.entries.slice(0, 12).map((entry, index) => row(entry, index + 1, 178 + index * 42)).join('');
 
     return [
         `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">`,
@@ -35,12 +35,12 @@ function renderSvg(data: FileExplorerCardData): string {
     ].join('');
 }
 
-function row(entry: FileExplorerEntry, y: number): string {
+function row(entry: FileExplorerEntry, index: number, y: number): string {
     const color = entry.kind === 'dir' ? '#8b5cf6' : '#10a37f';
 
     return [
         `<circle cx="84" cy="${y - 7}" r="7" fill="${color}"/>`,
-        text(entry.name, 108, y, 22, 680, '#f7f7f8', entry.kind === 'dir' ? 720 : 560),
+        text(`${index}. ${entry.name}`, 108, y, 22, 680, '#f7f7f8', entry.kind === 'dir' ? 720 : 560),
         text(entry.kind === 'dir' ? 'Directory' : 'File', 820, y, 19, 120, '#8e8ea0', 540),
         text(entry.size, 1030, y, 19, 160, '#c5c5d2', 560, 'end'),
         `<line x1="70" y1="${y + 16}" x2="1030" y2="${y + 16}" stroke="#30313a" stroke-width="1"/>`

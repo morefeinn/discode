@@ -20,7 +20,7 @@ import {
 } from 'discord.js';
 import { execFile } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
-import { mkdir, readdir } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -131,6 +131,22 @@ type QueuedSteer = PendingSteer & { noticeChannelId: string };
 type PendingAccess = { target: ResponseTarget; conversationKey: string; prompt: string; options: PromptOptions };
 type PendingLimit = { retry: LimitRetry; expiresAt: number };
 type DashboardView = { components: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[]; files: AttachmentBuilder[] };
+type ResponseCardSession = {
+    id: string;
+    createdAt: number;
+    cards: Buffer[];
+    extraFiles: AttachmentBuilder[];
+    controls: ActionRowBuilder<ButtonBuilder>[];
+};
+type FileExplorerSessionEntry = FileExplorerEntry & { fullPath: string };
+type FileExplorerSession = {
+    id: string;
+    root: string;
+    cwd: string;
+    createdAt: number;
+    entries: FileExplorerSessionEntry[];
+};
+type FileExplorerFocus = { root: string; cwd: string; updatedAt: number };
 
 const execFileAsync = promisify(execFile);
 const activeRuns = new Set<string>();
@@ -143,6 +159,9 @@ const queuedSteers = new Map<string, QueuedSteer[]>();
 const pendingAccessRequests = new Map<string, PendingAccess>();
 const pendingLimitRetries = new Map<string, PendingLimit>();
 const pendingProviderInstalls = new Map<string, PendingProviderInstall>();
+const responseCardSessions = new Map<string, ResponseCardSession>();
+const fileExplorerSessions = new Map<string, FileExplorerSession>();
+const fileExplorerFocusByChannel = new Map<string, FileExplorerFocus>();
 const componentMessageActivity = new Map<string, number>();
 const componentMessages = new Map<string, Message>();
 const latestComponentMessageByChannel = new Map<string, string>();
@@ -190,10 +209,17 @@ const WORKSPACE_SELECT_ID = 'discode:set-workspace';
 const WORKSPACE_ADD_BUTTON_ID = 'discode:add-workspace';
 const WORKSPACE_ADD_MODAL_ID = 'discode:add-workspace-modal';
 const FILE_EXPLORER_BUTTON_ID = 'discode:file-explorer';
+const FILE_EXPLORER_SELECT_ID = 'discode:file-select';
+const FILE_EXPLORER_UP_ID = 'discode:file-up';
+const FILE_EXPLORER_ZIP_ID = 'discode:file-zip';
+const FILE_EXPLORER_UPLOAD_ID = 'discode:file-upload';
+const FILE_UPLOAD_MODAL_ID = 'discode:file-upload-modal';
 const TERMINAL_RUN_BUTTON_ID = 'discode:terminal-run';
 const TERMINAL_RUN_MODAL_ID = 'discode:terminal-run-modal';
 const MCP_ADD_BUTTON_ID = 'discode:add-mcp';
 const MCP_ADD_MODAL_ID = 'discode:add-mcp-modal';
+const RESPONSE_CARD_PREV_ID = 'discode:response-prev';
+const RESPONSE_CARD_NEXT_ID = 'discode:response-next';
 const COMPONENT_IDLE_TTL_MS = 60 * 1000;
 const USAGE_DASHBOARD_TTL_MS = COMPONENT_IDLE_TTL_MS;
 const ACCOUNT_ADJECTIVES = ['North', 'Bright', 'Clear', 'Prime', 'Stone', 'Swift', 'True', 'Silver', 'Golden', 'Blue', 'Red', 'Green', 'Quiet', 'Open', 'Steady', 'Fresh'];
@@ -643,6 +669,29 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.isButton() && interaction.customId.startsWith(FILE_EXPLORER_UP_ID)) {
+            await interaction.deferUpdate();
+            const sessionId = interaction.customId.split(':').at(-1) || '';
+
+            await this.moveFileExplorerUp(interaction, sessionId);
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId.startsWith(FILE_EXPLORER_ZIP_ID)) {
+            await interaction.deferUpdate();
+            const sessionId = interaction.customId.split(':').at(-1) || '';
+
+            await this.sendDirectoryZip(interaction, sessionId);
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId.startsWith(FILE_EXPLORER_UPLOAD_ID)) {
+            const sessionId = interaction.customId.split(':').at(-1) || '';
+
+            await interaction.showModal(this.createFileUploadModal(sessionId));
+            return;
+        }
+
         if (interaction.isButton() && interaction.customId === TERMINAL_RUN_BUTTON_ID) {
             await interaction.showModal(this.createTerminalModal());
             return;
@@ -790,6 +839,36 @@ export class DiscordCodexBridge {
                 return;
             }
             await interaction.showModal(this.createAddAccountModal(provider));
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId.startsWith(FILE_EXPLORER_SELECT_ID)) {
+            await interaction.deferUpdate();
+            const sessionId = interaction.customId.split(':').at(-1) || '';
+
+            await this.handleFileExplorerSelection(interaction, sessionId, interaction.values[0]);
+            return;
+        }
+
+        if (interaction.isButton() && (interaction.customId.startsWith(RESPONSE_CARD_PREV_ID) || interaction.customId.startsWith(RESPONSE_CARD_NEXT_ID))) {
+            await interaction.deferUpdate();
+            const parts = interaction.customId.split(':');
+            const page = Math.max(0, Number(parts.at(-1)) || 0);
+            const sessionId = parts.at(-2) || '';
+            const view = this.createResponseCardView(sessionId, page);
+
+            if (!view) {
+                await interaction.editReply({ content: 'That response page expired.', attachments: [], components: [] });
+                return;
+            }
+            await interaction.editReply({
+                content: '',
+                embeds: [],
+                attachments: [],
+                components: view.components,
+                files: view.files
+            });
+            this.scheduleComponentExpiry(interaction.message, view.components.length > 0, true);
             return;
         }
 
@@ -1013,6 +1092,23 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.customId.startsWith(`${FILE_UPLOAD_MODAL_ID}:`)) {
+            const sessionId = interaction.customId.split(':').at(-1) || '';
+            const source = interaction.fields.getTextInputValue('source').trim();
+            const session = fileExplorerSessions.get(sessionId);
+
+            if (!session || !source) {
+                await interaction.reply({ content: 'That file explorer session expired.', flags: MessageFlags.Ephemeral });
+                return;
+            }
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+            const result = await this.importFileIntoDirectory(source, session.cwd);
+
+            await interaction.editReply(result);
+            await this.refreshFileExplorerMessage(interaction.message as Message | null, sessionId);
+            return;
+        }
+
         if (interaction.customId.startsWith(`${ADD_ACCOUNT_MODAL_ID}:`)) {
             const provider = interaction.customId.split(':').at(-1) || '';
 
@@ -1057,6 +1153,7 @@ export class DiscordCodexBridge {
                 await updateRun(run.id, { status: 'failed' });
                 continue;
             }
+            await this.cleanupRecoveredStatusMessage(channel as any, run.messageId);
             const statusMessage = await this.sendThinkingMessage(channel as any, 'Bot restarted, resuming this task');
             await this.runPrompt(statusMessage, run.conversationKey, run.prompt || 'Continue the previous task.', {
                 fresh: false,
@@ -1073,6 +1170,21 @@ export class DiscordCodexBridge {
                 recovering: true
             });
         }
+    }
+
+    private async cleanupRecoveredStatusMessage(channel: any, messageId?: string | null): Promise<void> {
+        if (!messageId || !channel?.messages?.fetch) return;
+        const message = await channel.messages.fetch(messageId).catch(() => null);
+
+        if (!message) return;
+        await message.delete().catch(async () => {
+            await message.edit({
+                content: '',
+                embeds: [],
+                attachments: [],
+                components: []
+            }).catch(() => undefined);
+        });
     }
 
     async handleMessage(message: Message, client: Client): Promise<boolean> {
@@ -1100,6 +1212,11 @@ export class DiscordCodexBridge {
 
         if (!request) {
             await message.reply('Send a prompt after the mention.');
+            return true;
+        }
+
+        if (message.attachments.size > 0 && this.isFileUploadRequest(request)) {
+            await this.saveUploadedAttachments(message, request);
             return true;
         }
 
@@ -1790,6 +1907,11 @@ export class DiscordCodexBridge {
             && !/\b(edit|fix|write|create|delete|remove|move|rename)\b/i.test(prompt);
     }
 
+    private isFileUploadRequest(prompt: string): boolean {
+        return /\b(upload|save|import|copy|drop|add)\b/i.test(prompt)
+            && /\b(files?|attachments?|into|directory|folder|workspace)\b/i.test(prompt);
+    }
+
     private async createNaturalToolPrompt(message: Message, client: Client, request: string): Promise<string | null> {
         if (!this.isTriageRequest(request)) return null;
 
@@ -2158,32 +2280,19 @@ export class DiscordCodexBridge {
 
     private async showFileExplorer(interaction: ChatInputCommandInteraction | ButtonInteraction, workspace?: string): Promise<void> {
         const project = await this.resolveProject(workspace || undefined);
-        const image = await renderFileExplorerCard({
-            title: path.basename(project.workspace) || 'Directory',
-            workspace: project.workspace,
-            entries: await this.readDirectoryEntries(project.workspace),
-            generatedAt: new Date().toLocaleString()
-        });
-        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-            new ButtonBuilder()
-                .setCustomId(WORKSPACE_ADD_BUTTON_ID)
-                .setLabel('Add directory')
-                .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-                .setCustomId(TERMINAL_RUN_BUTTON_ID)
-                .setLabel('Run terminal')
-                .setStyle(ButtonStyle.Secondary)
-        );
+        const session = await this.createFileExplorerSession(project.workspace, project.workspace);
+        const view = await this.createFileExplorerView(session.id);
         const payload = {
             content: '',
             embeds: [],
             attachments: [],
-            components: [row],
-            files: [new AttachmentBuilder(image, { name: `${this.commandName}-files.png` })]
+            components: view.components,
+            files: view.files
         };
 
         if (interaction instanceof ButtonInteraction) {
             await interaction.update(payload);
+            this.trackFileExplorerFocus(interaction.channelId, session);
             this.scheduleComponentExpiry(interaction.message, true);
             return;
         }
@@ -2192,32 +2301,102 @@ export class DiscordCodexBridge {
             ...payload,
             ...(await this.getSlashReplyOptions())
         });
+        this.trackFileExplorerFocus(interaction.channelId, session);
         this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, true);
     }
 
     private async sendFileExplorerMessage(message: Message, request: string): Promise<void> {
         const project = await this.resolveNaturalProject(request) || await this.resolveProject();
-        const image = await renderFileExplorerCard({
-            title: path.basename(project.workspace) || 'Directory',
-            workspace: project.workspace,
-            entries: await this.readDirectoryEntries(project.workspace),
-            generatedAt: new Date().toLocaleString()
-        });
+        const session = await this.createFileExplorerSession(project.workspace, project.workspace);
+        const view = await this.createFileExplorerView(session.id);
 
-        await message.reply({
+        const reply = await message.reply({
             content: '',
             embeds: [],
-            files: [new AttachmentBuilder(image, { name: `${this.commandName}-files.png` })]
+            components: view.components,
+            files: view.files
         });
+        this.trackFileExplorerFocus(message.channelId, session);
+        this.scheduleComponentExpiry(reply, true);
     }
 
-    private async readDirectoryEntries(workspace: string): Promise<FileExplorerEntry[]> {
+    private async createFileExplorerSession(root: string, cwd: string): Promise<FileExplorerSession> {
+        const session: FileExplorerSession = {
+            id: this.createUsageSessionId(),
+            root,
+            cwd: this.resolveSafePath(root, cwd) || root,
+            createdAt: Date.now(),
+            entries: []
+        };
+
+        session.entries = await this.readDirectoryEntries(session.cwd);
+        fileExplorerSessions.set(session.id, session);
+        this.pruneTransientSessions();
+
+        return session;
+    }
+
+    private async createFileExplorerView(sessionId: string): Promise<DashboardView> {
+        const session = fileExplorerSessions.get(sessionId);
+
+        if (!session) {
+            return {
+                components: [],
+                files: []
+            };
+        }
+        session.entries = await this.readDirectoryEntries(session.cwd);
+        session.createdAt = Date.now();
+        const image = await renderFileExplorerCard({
+            title: path.basename(session.cwd) || 'Directory',
+            workspace: session.cwd,
+            entries: session.entries,
+            generatedAt: new Date().toLocaleString()
+        });
+        const components: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] = [];
+        const options = session.entries.slice(0, 25).map((entry, index) => ({
+            label: `${entry.kind === 'dir' ? 'Open' : 'Send'} ${entry.name}`.slice(0, 100),
+            value: String(index),
+            description: `${entry.kind === 'dir' ? 'Directory' : 'File'} - ${entry.size}`.slice(0, 100)
+        }));
+
+        if (options.length > 0) {
+            components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                new StringSelectMenuBuilder()
+                    .setCustomId(`${FILE_EXPLORER_SELECT_ID}:${session.id}`)
+                    .setPlaceholder('Select a directory or file')
+                    .addOptions(options)
+            ));
+        }
+        components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`${FILE_EXPLORER_UP_ID}:${session.id}`)
+                .setLabel('Up')
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(path.resolve(session.cwd) === path.resolve(session.root)),
+            new ButtonBuilder()
+                .setCustomId(`${FILE_EXPLORER_ZIP_ID}:${session.id}`)
+                .setLabel('Zip directory')
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId(`${FILE_EXPLORER_UPLOAD_ID}:${session.id}`)
+                .setLabel('Upload file')
+                .setStyle(ButtonStyle.Primary)
+        ));
+
+        return {
+            components,
+            files: [new AttachmentBuilder(image, { name: `${this.commandName}-files.png` })]
+        };
+    }
+
+    private async readDirectoryEntries(workspace: string): Promise<FileExplorerSessionEntry[]> {
         const entries = await readdir(workspace, { withFileTypes: true }).catch(() => []);
 
         return entries
             .filter(entry => !entry.name.startsWith('.') && entry.name !== 'node_modules' && entry.name !== 'dist')
             .sort((left, right) => Number(right.isDirectory()) - Number(left.isDirectory()) || left.name.localeCompare(right.name))
-            .slice(0, 36)
+            .slice(0, 25)
             .map(entry => {
                 const fullPath = path.join(workspace, entry.name);
                 const stats = statSync(fullPath, { throwIfNoEntry: false });
@@ -2225,7 +2404,8 @@ export class DiscordCodexBridge {
                 return {
                     name: entry.name,
                     kind: entry.isDirectory() ? 'dir' as const : 'file' as const,
-                    size: entry.isDirectory() ? `${this.countImmediateChildren(fullPath)} items` : this.formatBytes(stats?.size || 0)
+                    size: entry.isDirectory() ? `${this.countImmediateChildren(fullPath)} items` : this.formatBytes(stats?.size || 0),
+                    fullPath
                 };
             });
     }
@@ -2243,6 +2423,245 @@ export class DiscordCodexBridge {
         if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
 
         return `${(value / 1024 / 1024).toFixed(1)} MB`;
+    }
+
+    private async handleFileExplorerSelection(interaction: StringSelectMenuInteraction, sessionId: string, value: string): Promise<void> {
+        const session = fileExplorerSessions.get(sessionId);
+        const index = Number(value);
+        const entry = session?.entries[index];
+
+        if (!session || !entry) {
+            await interaction.editReply({ content: 'That file explorer session expired.', components: [] });
+            return;
+        }
+
+        if (entry.kind === 'dir') {
+            session.cwd = entry.fullPath;
+            session.entries = await this.readDirectoryEntries(session.cwd);
+            this.trackFileExplorerFocus(interaction.channelId, session);
+            await this.updateFileExplorerReply(interaction, session.id);
+            return;
+        }
+
+        await this.sendSelectedFile(interaction, entry.fullPath);
+        this.trackFileExplorerFocus(interaction.channelId, session);
+        await this.updateFileExplorerReply(interaction, session.id);
+    }
+
+    private async moveFileExplorerUp(interaction: ButtonInteraction, sessionId: string): Promise<void> {
+        const session = fileExplorerSessions.get(sessionId);
+
+        if (!session) {
+            await interaction.editReply({ content: 'That file explorer session expired.', components: [] });
+            return;
+        }
+        const parent = this.resolveSafePath(session.root, path.dirname(session.cwd));
+
+        if (parent) {
+            session.cwd = parent;
+            session.entries = await this.readDirectoryEntries(session.cwd);
+        }
+        this.trackFileExplorerFocus(interaction.channelId, session);
+        await this.updateFileExplorerReply(interaction, session.id);
+    }
+
+    private async sendDirectoryZip(interaction: ButtonInteraction, sessionId: string): Promise<void> {
+        const session = fileExplorerSessions.get(sessionId);
+
+        if (!session) {
+            await interaction.followUp({ content: 'That file explorer session expired.', flags: MessageFlags.Ephemeral }).catch(() => undefined);
+            return;
+        }
+        const tempDir = await mkdtemp(path.join(os.tmpdir(), 'discode-zip-'));
+        const archivePath = path.join(tempDir, `${this.cleanFileName(path.basename(session.cwd) || 'directory')}.zip`);
+
+        try {
+            await execFileAsync('zip', ['-rq', archivePath, '.'], {
+                cwd: session.cwd,
+                timeout: 60 * 1000,
+                maxBuffer: 128 * 1024
+            });
+            const stats = statSync(archivePath, { throwIfNoEntry: false });
+
+            if (!stats?.isFile() || stats.size > MAX_ATTACHMENT_BYTES) {
+                await interaction.followUp({
+                    content: `The zip is too large to send (${stats ? this.formatBytes(stats.size) : 'unknown size'}).`,
+                    flags: MessageFlags.Ephemeral
+                });
+                return;
+            }
+            await interaction.followUp({
+                content: `Zipped \`${this.shortenPathTarget(session.cwd)}\`.`,
+                files: [new AttachmentBuilder(archivePath, { name: path.basename(archivePath) })]
+            });
+        } catch (error) {
+            await interaction.followUp({
+                content: `Could not zip this directory.\n\n${this.trimError(error instanceof Error ? error.message : String(error))}`,
+                flags: MessageFlags.Ephemeral
+            });
+        } finally {
+            await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+    }
+
+    private async sendSelectedFile(interaction: StringSelectMenuInteraction, filePath: string): Promise<void> {
+        const stats = statSync(filePath, { throwIfNoEntry: false });
+
+        if (!stats?.isFile()) {
+            await interaction.followUp({ content: 'That file is no longer readable.', flags: MessageFlags.Ephemeral });
+            return;
+        }
+        if (stats.size > MAX_ATTACHMENT_BYTES) {
+            await interaction.followUp({
+                content: `That file is too large to send (${this.formatBytes(stats.size)}).`,
+                flags: MessageFlags.Ephemeral
+            });
+            return;
+        }
+        await interaction.followUp({
+            content: `Sending \`${this.shortenPathTarget(filePath)}\`.`,
+            files: [new AttachmentBuilder(filePath, { name: path.basename(filePath) })]
+        });
+    }
+
+    private async updateFileExplorerReply(interaction: ComponentInteraction, sessionId: string): Promise<void> {
+        const view = await this.createFileExplorerView(sessionId);
+
+        await interaction.editReply({
+            content: '',
+            embeds: [],
+            attachments: [],
+            components: view.components,
+            files: view.files
+        });
+        this.scheduleComponentExpiry(interaction.message, view.components.length > 0);
+    }
+
+    private async refreshFileExplorerMessage(message: Message | null | undefined, sessionId: string): Promise<void> {
+        if (!message) return;
+        const view = await this.createFileExplorerView(sessionId);
+
+        await message.edit({
+            content: '',
+            embeds: [],
+            attachments: [],
+            components: view.components,
+            files: view.files
+        }).catch(() => undefined);
+        this.scheduleComponentExpiry(message, view.components.length > 0);
+    }
+
+    private createFileUploadModal(sessionId: string): ModalBuilder {
+        return new ModalBuilder()
+            .setCustomId(`${FILE_UPLOAD_MODAL_ID}:${sessionId}`)
+            .setTitle('Upload into directory')
+            .addComponents(
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('source')
+                        .setLabel('Local file path or attachment URL')
+                        .setStyle(TextInputStyle.Paragraph)
+                        .setRequired(true)
+                )
+            );
+    }
+
+    private async importFileIntoDirectory(source: string, directory: string): Promise<string> {
+        const targetName = this.cleanFileName(path.basename(source.split('?')[0] || 'upload'));
+        const targetPath = path.join(directory, targetName || 'upload');
+
+        if (/^https?:\/\//i.test(source)) {
+            const response = await fetch(source);
+
+            if (!response.ok) return `Download failed: HTTP ${response.status}.`;
+            const buffer = Buffer.from(await response.arrayBuffer());
+
+            if (buffer.byteLength > MAX_ATTACHMENT_BYTES) return `That file is too large (${this.formatBytes(buffer.byteLength)}).`;
+            await writeFile(targetPath, buffer);
+
+            return `Uploaded \`${path.basename(targetPath)}\` into \`${this.shortenPathTarget(directory)}\`.`;
+        }
+
+        const localPath = this.expandHomePath(source);
+        const stats = statSync(localPath, { throwIfNoEntry: false });
+
+        if (!stats?.isFile()) return 'That local path is not a readable file.';
+        if (stats.size > MAX_ATTACHMENT_BYTES) return `That file is too large (${this.formatBytes(stats.size)}).`;
+        await copyFile(localPath, path.join(directory, this.cleanFileName(path.basename(localPath))));
+
+        return `Uploaded \`${path.basename(localPath)}\` into \`${this.shortenPathTarget(directory)}\`.`;
+    }
+
+    private async saveUploadedAttachments(message: Message, request: string): Promise<void> {
+        const project = await this.resolveNaturalProject(request) || await this.resolveProject();
+        const focus = this.getFileExplorerFocus(message.channelId, project.workspace);
+        const results: string[] = [];
+
+        for (const attachment of message.attachments.values()) {
+            const name = this.cleanFileName(attachment.name || path.basename(new URL(attachment.url).pathname) || 'upload');
+            const response = await fetch(attachment.url).catch(() => null);
+
+            if (!response?.ok) {
+                results.push(`${name}: download failed`);
+                continue;
+            }
+            const buffer = Buffer.from(await response.arrayBuffer());
+
+            if (buffer.byteLength > MAX_ATTACHMENT_BYTES) {
+                results.push(`${name}: too large`);
+                continue;
+            }
+            await writeFile(path.join(focus.cwd, name), buffer);
+            results.push(`${name}: saved`);
+        }
+
+        const session = await this.createFileExplorerSession(focus.root, focus.cwd);
+        const view = await this.createFileExplorerView(session.id);
+        const reply = await message.reply({
+            content: `Uploaded to \`${this.shortenPathTarget(focus.cwd)}\`.\n${results.join('\n')}`,
+            embeds: [],
+            components: view.components,
+            files: view.files
+        });
+        this.trackFileExplorerFocus(message.channelId, session);
+        this.scheduleComponentExpiry(reply, true);
+    }
+
+    private trackFileExplorerFocus(channelId: string, session: FileExplorerSession): void {
+        fileExplorerFocusByChannel.set(channelId, {
+            root: session.root,
+            cwd: session.cwd,
+            updatedAt: Date.now()
+        });
+    }
+
+    private getFileExplorerFocus(channelId: string, fallbackRoot: string): FileExplorerFocus {
+        const focus = fileExplorerFocusByChannel.get(channelId);
+
+        if (focus && Date.now() - focus.updatedAt <= 30 * 60 * 1000 && this.resolveSafePath(focus.root, focus.cwd)) {
+            return focus;
+        }
+
+        return {
+            root: fallbackRoot,
+            cwd: fallbackRoot,
+            updatedAt: Date.now()
+        };
+    }
+
+    private resolveSafePath(root: string, target: string): string | null {
+        const resolvedRoot = path.resolve(root);
+        const resolvedTarget = path.resolve(target);
+
+        if (resolvedTarget === resolvedRoot || resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`)) {
+            return resolvedTarget;
+        }
+
+        return null;
+    }
+
+    private cleanFileName(value: string): string {
+        return value.replace(/[\\/:\0]/g, '-').trim().slice(0, 120) || 'upload';
     }
 
     private async showTerminalDashboard(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -2612,27 +3031,30 @@ export class DiscordCodexBridge {
 
         if (responseImages) {
             const responseCards = await renderFinalResponseCards(formatted, this.botName);
-            const cardFiles = responseCards.map((card, index) => new AttachmentBuilder(card, { name: `discode-response-${index + 1}.png` }));
-            const firstFiles = [...cardFiles.slice(0, 1), ...files].slice(0, 10);
+            const sessionId = this.createUsageSessionId();
+            const session: ResponseCardSession = {
+                id: sessionId,
+                createdAt: Date.now(),
+                cards: responseCards,
+                extraFiles: files.slice(0, 9),
+                controls: components
+            };
+            responseCardSessions.set(sessionId, session);
+            this.pruneTransientSessions();
+            const view = this.createResponseCardView(sessionId, 0);
+
+            if (!view) return null;
 
             if (target instanceof Message) {
-                let latest = await target.edit({ content: '', attachments: [], files: firstFiles, components }).catch(async () => {
-                    return (target.channel as any).send({ content: '', files: firstFiles, components });
+                const latest = await target.edit({ content: '', attachments: [], files: view.files, components: view.components }).catch(async () => {
+                    return (target.channel as any).send({ content: '', files: view.files, components: view.components });
                 });
-                this.scheduleComponentExpiry(latest, components.length > 0, true);
-
-                for (const card of cardFiles.slice(1)) {
-                    latest = await (target.channel as any).send({ content: '', files: [card] });
-                }
+                this.scheduleComponentExpiry(latest, view.components.length > 0, true);
                 return latest || null;
             }
 
-            let latest = await target.editReply({ content: '', attachments: [], files: firstFiles, components });
-            this.scheduleComponentExpiry(latest as Message, components.length > 0, true);
-
-            for (const card of cardFiles.slice(1)) {
-                latest = await target.followUp({ content: '', files: [card] });
-            }
+            const latest = await target.editReply({ content: '', attachments: [], files: view.files, components: view.components });
+            this.scheduleComponentExpiry(latest as Message, view.components.length > 0, true);
 
             return latest as Message || null;
         }
@@ -2657,6 +3079,41 @@ export class DiscordCodexBridge {
         }
 
         return latest || null;
+    }
+
+    private createResponseCardView(sessionId: string, page: number): DashboardView | null {
+        const session = responseCardSessions.get(sessionId);
+
+        if (!session) return null;
+        const pageCount = Math.max(1, session.cards.length);
+        const normalizedPage = Math.min(Math.max(page, 0), pageCount - 1);
+        const files = [
+            new AttachmentBuilder(session.cards[normalizedPage], { name: `discode-response-${normalizedPage + 1}.png` }),
+            ...(normalizedPage === 0 ? session.extraFiles : [])
+        ].slice(0, 10);
+        const components: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] = [];
+
+        session.createdAt = Date.now();
+        if (pageCount > 1) {
+            components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`${RESPONSE_CARD_PREV_ID}:${sessionId}:${Math.max(0, normalizedPage - 1)}`)
+                    .setLabel('Previous')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(normalizedPage === 0),
+                new ButtonBuilder()
+                    .setCustomId(`${RESPONSE_CARD_NEXT_ID}:${sessionId}:${Math.min(pageCount - 1, normalizedPage + 1)}`)
+                    .setLabel(`Next (${normalizedPage + 1}/${pageCount})`)
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(normalizedPage >= pageCount - 1)
+            ));
+        }
+        components.push(...session.controls);
+
+        return {
+            components,
+            files
+        };
     }
 
     private formatDiscordOutput(text: string): string {
@@ -3387,6 +3844,21 @@ export class DiscordCodexBridge {
                 componentMessageActivity.delete(messageId);
                 componentMessages.delete(messageId);
             }
+        }
+        this.pruneTransientSessions();
+    }
+
+    private pruneTransientSessions(): void {
+        const now = Date.now();
+
+        for (const [id, session] of responseCardSessions) {
+            if (now - session.createdAt > COMPONENT_IDLE_TTL_MS) responseCardSessions.delete(id);
+        }
+        for (const [id, session] of fileExplorerSessions) {
+            if (now - session.createdAt > COMPONENT_IDLE_TTL_MS) fileExplorerSessions.delete(id);
+        }
+        for (const [channelId, focus] of fileExplorerFocusByChannel) {
+            if (now - focus.updatedAt > 30 * 60 * 1000) fileExplorerFocusByChannel.delete(channelId);
         }
     }
 

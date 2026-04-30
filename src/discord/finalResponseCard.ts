@@ -78,7 +78,87 @@ function cleanResponse(value: string): string {
 }
 
 function bodyText(value: string, x: number, y: number): string {
-    return `<text x="${x}" y="${y}" fill="#e8e8ef" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="21" font-weight="520" letter-spacing="0">${escapeXml(value || ' ')}</text>`;
+    const segments = parseInlineMarkdown(value || ' ');
+
+    return [
+        `<text x="${x}" y="${y}" fill="#e8e8ef" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="21" font-weight="520" letter-spacing="0">`,
+        ...segments.map(segment => renderSegment(segment)),
+        '</text>'
+    ].join('');
+}
+
+type InlineSegment = { text: string; kind: 'text' | 'code' | 'link' | 'file' };
+
+function parseInlineMarkdown(value: string): InlineSegment[] {
+    const segments: InlineSegment[] = [];
+    let index = 0;
+
+    while (index < value.length) {
+        const linkStart = value.indexOf('[', index);
+        const codeStart = value.indexOf('`', index);
+        const starts = [linkStart, codeStart].filter(position => position >= 0);
+        const next = starts.length > 0 ? Math.min(...starts) : -1;
+
+        if (next < 0) {
+            pushText(segments, value.slice(index));
+            break;
+        }
+        if (next > index) {
+            pushText(segments, value.slice(index, next));
+            index = next;
+            continue;
+        }
+        if (next === codeStart) {
+            const end = value.indexOf('`', codeStart + 1);
+
+            if (end < 0) {
+                pushText(segments, value.slice(index));
+                break;
+            }
+            const content = value.slice(codeStart + 1, end);
+
+            segments.push({ text: content, kind: looksFileReference(content) ? 'file' : 'code' });
+            index = end + 1;
+            continue;
+        }
+        const labelEnd = value.indexOf(']', linkStart + 1);
+        const urlStart = labelEnd >= 0 && value[labelEnd + 1] === '(' ? labelEnd + 2 : -1;
+        const urlEnd = urlStart >= 0 ? value.indexOf(')', urlStart) : -1;
+
+        if (labelEnd < 0 || urlStart < 0 || urlEnd < 0) {
+            pushText(segments, value.charAt(index));
+            index += 1;
+            continue;
+        }
+        segments.push({ text: value.slice(linkStart + 1, labelEnd), kind: 'link' });
+        index = urlEnd + 1;
+    }
+
+    return segments.length > 0 ? segments : [{ text: ' ', kind: 'text' }];
+}
+
+function pushText(segments: InlineSegment[], value: string): void {
+    if (!value) return;
+    const text = value
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/__([^_]+)__/g, '$1');
+
+    if (text) segments.push({ text, kind: 'text' });
+}
+
+function renderSegment(segment: InlineSegment): string {
+    if (segment.kind === 'link' || segment.kind === 'file') {
+        return `<tspan fill="#7dd3fc" text-decoration="underline">${escapeXml(segment.text)}</tspan>`;
+    }
+    if (segment.kind === 'code') {
+        return `<tspan fill="#fbbf24" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace">${escapeXml(segment.text)}</tspan>`;
+    }
+
+    return `<tspan>${escapeXml(segment.text)}</tspan>`;
+}
+
+function looksFileReference(value: string): boolean {
+    return /(?:^~\/|\/|\\|[A-Za-z0-9_.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|lua|py|css|html|png|jpe?g|gif|webp|txt|log))(?:\:\d+)?$/i.test(value);
 }
 
 function text(
