@@ -23,7 +23,8 @@
     "dev": "bun src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target bun --packages external",
     "check": "tsc --noEmit",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "discord.js": "^14.14.1",

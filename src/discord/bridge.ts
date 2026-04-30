@@ -26,7 +26,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { BridgeConfig } from '../config.js';
 import { CodexReviewOptions, CodexRunResult, CodexRunner, CodexUsage } from '../codex/runner.js';
-import { AccountRouter, AccountSummary } from '../accounts/router.js';
+import { AccountProvider, AccountRouter, AccountSummary } from '../accounts/router.js';
 import { fetchAccountUsage, AccountUsage } from '../codex/usage.js';
 import {
     clearConversation,
@@ -121,10 +121,12 @@ type PromptOptions = {
     runId?: string;
     recovering?: boolean;
     requesterId?: string;
+    requesterName?: string | null;
+    providerInstallAttempted?: boolean;
 };
 type LimitRetry =
-    | { kind: 'prompt'; conversationKey: string; prompt: string; options: PromptOptions; requesterId?: string }
-    | { kind: 'review'; options: CodexReviewOptions; requesterId?: string };
+    | { kind: 'prompt'; conversationKey: string; prompt: string; options: PromptOptions; requesterId?: string; installAttempted?: boolean }
+    | { kind: 'review'; options: CodexReviewOptions; requesterId?: string; installAttempted?: boolean };
 type PendingProviderInstall = {
     retry: LimitRetry;
     command: string;
@@ -224,6 +226,7 @@ const USAGE_ACTIVATE_ACCOUNT_ID = 'discode:usage-activate-account';
 const WORKSPACE_SELECT_ID = 'discode:set-workspace';
 const THREAD_WORKSPACE_SELECT_ID = 'discode:thread-workspace';
 const WORKSPACE_ADD_BUTTON_ID = 'discode:add-workspace';
+const THREAD_WORKSPACE_ADD_BUTTON_ID = 'discode:add-thread-workspace';
 const WORKSPACE_ADD_MODAL_ID = 'discode:add-workspace-modal';
 const FILE_EXPLORER_BUTTON_ID = 'discode:file-explorer';
 const FILE_EXPLORER_SELECT_ID = 'discode:file-select';
@@ -244,20 +247,32 @@ const ACCOUNT_ADJECTIVES = ['North', 'Bright', 'Clear', 'Prime', 'Stone', 'Swift
 const ACCOUNT_NOUNS = ['Harbor', 'Keystone', 'Beacon', 'Ledger', 'Vault', 'Signal', 'Bridge', 'Forge', 'Anchor', 'Summit', 'Field', 'Orbit', 'Relay', 'Crown', 'Path', 'Gate'];
 const AGENT_COLORS = ['#8b5cf6', '#10a37f', '#3b82f6', '#f59e0b', '#ec4899', '#14b8a6'];
 const reasoningChoices: { label: string; value: ReasoningEffort; description: string }[] = [
-    { label: 'None', value: 'none', description: 'Use the provider config default.' },
+    { label: 'None', value: 'none', description: 'Use the provider default.' },
     { label: 'Low', value: 'low', description: 'Faster answers for lighter work.' },
     { label: 'Medium', value: 'medium', description: 'Balanced reasoning for normal work.' },
     { label: 'High', value: 'high', description: 'Deeper reasoning for harder tasks.' },
     { label: 'XHigh', value: 'xhigh', description: 'Maximum reasoning for complex work.' }
 ];
 const providerChoices: { label: string; value: ProviderType; description: string }[] = [
+    { label: 'Discode', value: 'discode', description: 'Use the native local harness.' },
     { label: 'Codex', value: 'codex', description: 'Use the local Codex CLI.' },
-    { label: 'OpenCode', value: 'opencode', description: 'Use an opencode CLI wrapper.' },
+    { label: 'OpenCode', value: 'opencode', description: 'Use an optional opencode CLI wrapper.' },
     { label: 'Anthropic', value: 'anthropic', description: 'Use an Anthropic-compatible CLI.' },
     { label: 'Z.ai', value: 'zai', description: 'Use a Z.ai-compatible CLI.' },
     { label: 'Qwen', value: 'qwen', description: 'Use a Qwen-compatible CLI.' },
     { label: 'Custom', value: 'custom', description: 'Use DISCODE_PROVIDER_COMMAND.' }
 ];
+const accountProviderChoices = providerChoices
+    .filter((choice): choice is { label: string; value: AccountProvider; description: string } => choice.value !== 'discode');
+
+function isAccountProvider(value: unknown): value is AccountProvider {
+    return value === 'codex'
+        || value === 'opencode'
+        || value === 'anthropic'
+        || value === 'zai'
+        || value === 'qwen'
+        || value === 'custom';
+}
 const permissionChoices: { label: string; value: PermissionMode; description: string }[] = [
     { label: 'Full Access', value: 'full', description: 'Allow full agent automation.' },
     { label: 'Directory Only', value: 'directory', description: 'Ask before elevated access.' },
@@ -416,7 +431,7 @@ export class DiscordCodexBridge {
             const provider = getEffectiveProvider(settings, this.config.defaultProvider);
             const permissionMode = getEffectivePermissionMode(settings, this.config.defaultPermissionMode);
             const shouldCreateThread = Boolean(interaction.guild && interaction.channel && !interaction.channel.isThread());
-            const chatName = this.getChatName(prompt);
+            const chatName = await this.getUsefulChatName(prompt, interaction.user.username);
 
             if (shouldCreateThread) {
                 await interaction.deferReply(await this.getSlashReplyOptions());
@@ -435,7 +450,8 @@ export class DiscordCodexBridge {
                     dangerous: interaction.options.getBoolean('dangerous') === true || this.isPublishRequest(prompt),
                     chatName,
                     discordThreadId: thread.id,
-                    requesterId: interaction.user.id
+                    requesterId: interaction.user.id,
+                    requesterName: interaction.user.username
                 });
                 return;
             }
@@ -452,7 +468,8 @@ export class DiscordCodexBridge {
                 reasoningEffort,
                 dangerous: interaction.options.getBoolean('dangerous') === true || this.isPublishRequest(prompt),
                 chatName,
-                requesterId: interaction.user.id
+                requesterId: interaction.user.id,
+                requesterName: interaction.user.username
             });
             return;
         }
@@ -476,8 +493,9 @@ export class DiscordCodexBridge {
                 provider: getEffectiveProvider(settings, this.config.defaultProvider),
                 permissionMode: getEffectivePermissionMode(settings, this.config.defaultPermissionMode),
                 reasoningEffort: getEffectiveReasoning(settings),
-                chatName: this.getChatName(`Image ${prompt}`),
-                requesterId: interaction.user.id
+                chatName: await this.getUsefulChatName(`Image ${prompt}`, interaction.user.username),
+                requesterId: interaction.user.id,
+                requesterName: interaction.user.username
             });
             return;
         }
@@ -517,7 +535,7 @@ export class DiscordCodexBridge {
             const reasoningEffort = getEffectiveReasoning(settings);
             const provider = getEffectiveProvider(settings, this.config.defaultProvider);
             const permissionMode = getEffectivePermissionMode(settings, this.config.defaultPermissionMode);
-            const chatName = this.getChatName(`Triage ${targetChannel.name || targetChannel.id}`);
+            const chatName = await this.getUsefulChatName(`Triage ${targetChannel.name || targetChannel.id}`, interaction.user.username);
             const shouldCreateThread = Boolean(interaction.guild && interaction.channel && !interaction.channel.isThread());
 
             if (shouldCreateThread) {
@@ -536,7 +554,8 @@ export class DiscordCodexBridge {
                     dangerous: interaction.options.getBoolean('dangerous') === true,
                     chatName,
                     discordThreadId: thread.id,
-                    requesterId: interaction.user.id
+                    requesterId: interaction.user.id,
+                    requesterName: interaction.user.username
                 });
                 return;
             }
@@ -551,7 +570,8 @@ export class DiscordCodexBridge {
                 reasoningEffort,
                 dangerous: interaction.options.getBoolean('dangerous') === true,
                 chatName,
-                requesterId: interaction.user.id
+                requesterId: interaction.user.id,
+                requesterName: interaction.user.username
             });
             return;
         }
@@ -613,7 +633,8 @@ export class DiscordCodexBridge {
                 dangerous: interaction.options.getBoolean('dangerous') === true,
                 chatName,
                 discordThreadId: thread.id,
-                requesterId: interaction.user.id
+                requesterId: interaction.user.id,
+                requesterName: interaction.user.username
             });
             return;
         }
@@ -628,7 +649,8 @@ export class DiscordCodexBridge {
             reasoningEffort,
             dangerous: interaction.options.getBoolean('dangerous') === true,
             chatName,
-            requesterId: interaction.user.id
+            requesterId: interaction.user.id,
+            requesterName: interaction.user.username
         });
     }
 
@@ -695,6 +717,11 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.isButton() && interaction.customId === THREAD_WORKSPACE_ADD_BUTTON_ID) {
+            await interaction.showModal(this.createWorkspaceModal('thread'));
+            return;
+        }
+
         if (interaction.isButton() && interaction.customId === WORKSPACE_ADD_BUTTON_ID) {
             await interaction.showModal(this.createWorkspaceModal());
             return;
@@ -758,7 +785,7 @@ export class DiscordCodexBridge {
         if (interaction.isButton() && interaction.customId.startsWith(INSTALL_PROVIDER_BUTTON_ID)) {
             const id = interaction.customId.split(':').at(-1) || '';
 
-            await this.installProviderAndRetry(interaction, id);
+            await this.installProviderFromButton(interaction, id);
             return;
         }
 
@@ -885,7 +912,7 @@ export class DiscordCodexBridge {
         if (interaction.isStringSelectMenu() && interaction.customId === ADD_ACCOUNT_PROVIDER_SELECT_ID) {
             const provider = interaction.values[0];
 
-            if (!isProviderType(provider)) {
+            if (!isAccountProvider(provider)) {
                 await interaction.reply({ content: 'That provider is not supported.', flags: MessageFlags.Ephemeral });
                 return;
             }
@@ -948,9 +975,7 @@ export class DiscordCodexBridge {
 
         if (interaction.isStringSelectMenu() && interaction.customId === THREAD_WORKSPACE_SELECT_ID) {
             await interaction.deferUpdate();
-            const project = interaction.values[0] === '__default_workspace__'
-                ? await saveProject({ name: 'Default', workspace: this.config.defaultWorkspace, model: this.config.defaultModel })
-                : await setActiveProject(interaction.values[0]);
+            const project = await setActiveProject(interaction.values[0]);
             const channelId = interaction.channelId;
             const existing = await getConversation(channelId);
 
@@ -960,14 +985,15 @@ export class DiscordCodexBridge {
                 discordThreadId: interaction.channel?.isThread() ? channelId : existing?.discordThreadId || null,
                 latestMessageId: existing?.latestMessageId || interaction.message.id,
                 codexThreadId: existing?.codexThreadId || '',
-                name: existing?.name || this.getChatName(interaction.channel?.isThread() ? interaction.channel.name : 'New conversation'),
+                name: existing?.name || await this.createFallbackChatName(interaction.user.username),
+                requesterName: existing?.requesterName || interaction.user.username,
                 workspace: project.workspace,
                 model: project.model || null,
                 updatedAt: new Date().toISOString()
             });
             await interaction.editReply({
                 content: `Project set to **${project.name}**. Send the first prompt in this thread when ready.`,
-                components: [await this.createThreadWorkspaceRow(project.name)]
+                components: await this.createThreadWorkspaceRows(project.name)
             });
             this.scheduleComponentExpiry(interaction.message, true);
             return;
@@ -1130,13 +1156,41 @@ export class DiscordCodexBridge {
             return;
         }
 
-        if (interaction.customId === WORKSPACE_ADD_MODAL_ID) {
+        if (interaction.customId === WORKSPACE_ADD_MODAL_ID || interaction.customId === `${WORKSPACE_ADD_MODAL_ID}:thread`) {
             const workspace = this.expandHomePath(interaction.fields.getTextInputValue('workspace').trim());
             const name = this.cleanProjectName(interaction.fields.getTextInputValue('name') || path.basename(workspace));
             const model = interaction.fields.getTextInputValue('model').trim() || undefined;
+            const project = { name, workspace, model };
 
             await mkdir(workspace, { recursive: true });
-            await saveProject({ name, workspace, model });
+            const savedProject = await saveProject(project);
+            if (interaction.customId.endsWith(':thread')) {
+                const channelId = interaction.channelId;
+
+                if (!channelId) {
+                    await interaction.reply({ content: `Workspace created as **${savedProject.name}**.`, flags: MessageFlags.Ephemeral });
+                    return;
+                }
+                const existing = await getConversation(channelId);
+
+                await saveConversation({
+                    discordChannelId: channelId,
+                    discordGuildId: interaction.guildId || existing?.discordGuildId || null,
+                    discordThreadId: interaction.channel?.isThread() ? channelId : existing?.discordThreadId || null,
+                    latestMessageId: existing?.latestMessageId || null,
+                    codexThreadId: existing?.codexThreadId || '',
+                    name: existing?.name || await this.createFallbackChatName(interaction.user.username),
+                    requesterName: existing?.requesterName || interaction.user.username,
+                    workspace: savedProject.workspace,
+                    model: savedProject.model || null,
+                    updatedAt: new Date().toISOString()
+                });
+                await interaction.reply({
+                    content: `Workspace set to **${savedProject.name}**. Send the first prompt in this thread when ready.`,
+                    flags: MessageFlags.Ephemeral
+                });
+                return;
+            }
             await this.showWorkspaceDashboard(interaction);
             return;
         }
@@ -1239,7 +1293,7 @@ export class DiscordCodexBridge {
         if (interaction.customId.startsWith(`${ADD_ACCOUNT_MODAL_ID}:`)) {
             const provider = interaction.customId.split(':').at(-1) || '';
 
-            if (!isProviderType(provider)) {
+            if (!isAccountProvider(provider)) {
                 await interaction.reply({ content: 'That provider is not supported.', flags: MessageFlags.Ephemeral });
                 return;
             }
@@ -1376,7 +1430,7 @@ export class DiscordCodexBridge {
         );
 
         if (message.guild && !message.channel.isThread()) {
-            const chatName = this.getChatName(request);
+            const chatName = await this.getUsefulChatName(request, message.author.username);
             const thread = await this.createThread(message.channel as TextChannel, chatName);
             const statusMessage = await this.sendThinkingMessage(thread, `Starting ${chatName}`);
             await this.runPrompt(statusMessage, thread.id, codexPrompt, {
@@ -1389,11 +1443,13 @@ export class DiscordCodexBridge {
                 dangerous: this.isPublishRequest(request),
                 chatName,
                 discordThreadId: thread.id,
-                requesterId: message.author.id
+                requesterId: message.author.id,
+                requesterName: message.author.username
             });
             return true;
         }
 
+        const chatName = await this.getUsefulChatName(request, message.author.username);
         const promptOptions: PromptOptions = {
             workspace: project.workspace,
             model: selectedModel,
@@ -1401,9 +1457,10 @@ export class DiscordCodexBridge {
             permissionMode,
             reasoningEffort,
             dangerous: this.isPublishRequest(request),
-            chatName: this.getChatName(request),
+            chatName,
             discordThreadId: message.channel.isThread() ? message.channel.id : null,
-            requesterId: message.author.id
+            requesterId: message.author.id,
+            requesterName: message.author.username
         };
 
         if (activeRuns.has(message.channel.id)) {
@@ -1495,6 +1552,7 @@ export class DiscordCodexBridge {
                     latestMessageId: conversation?.latestMessageId || null,
                     codexThreadId: result.threadId,
                     name: this.selectConversationName(conversation?.name, options.chatName, prompt),
+                    requesterName: options.requesterName || conversation?.requesterName || null,
                     workspace: options.workspace || conversation?.workspace || this.config.defaultWorkspace,
                     model: options.model || conversation?.model || null,
                     updatedAt: new Date().toISOString()
@@ -1554,7 +1612,8 @@ export class DiscordCodexBridge {
                         ...options,
                         fresh: false
                     },
-                    requesterId: options.requesterId
+                    requesterId: options.requesterId,
+                    installAttempted: options.providerInstallAttempted
                 });
                 return;
             }
@@ -1639,7 +1698,8 @@ export class DiscordCodexBridge {
                 await this.sendMissingProviderResponse(target, result, {
                     kind: 'review',
                     options,
-                    requesterId: options.requesterId
+                    requesterId: options.requesterId,
+                    installAttempted: (options as CodexReviewOptions & { providerInstallAttempted?: boolean }).providerInstallAttempted
                 });
                 return;
             }
@@ -1834,60 +1894,50 @@ export class DiscordCodexBridge {
     private async sendMissingProviderResponse(target: ResponseTarget, result: CodexRunResult, retry: LimitRetry): Promise<Message | null> {
         const executable = result.missingExecutable || 'provider CLI';
         const provider = result.provider ? this.capitalize(result.provider) : 'Provider';
-        const lines = [
-            `${provider} is not installed or is not on this bot process PATH.`,
-            '',
-            `Missing executable: \`${executable}\``,
-            result.installCommand ? `Installer: \`${result.installCommand}\`` : 'No automatic installer is configured for this provider. Add a command override in the account or settings.',
-            '',
-            this.trimError(result.error || result.text)
-        ].filter(Boolean);
-        const components: ActionRowBuilder<ButtonBuilder>[] = [];
-
-        if (result.installCommand) {
-            const id = this.createUsageSessionId();
-
-            pendingProviderInstalls.set(id, {
-                retry,
-                command: result.installCommand,
-                executable,
-                label: result.installLabel || `Install ${provider}`,
-                expiresAt: Date.now() + 5 * COMPONENT_IDLE_TTL_MS
-            });
-            components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
-                new ButtonBuilder()
-                    .setCustomId(`${INSTALL_PROVIDER_BUTTON_ID}:${id}`)
-                    .setLabel('Install and retry')
-                    .setStyle(ButtonStyle.Primary),
+        const baseLine = `${provider} is not installed or is not on this bot process PATH.`;
+        const canInstall = Boolean(result.installCommand) && !retry.installAttempted;
+        const components: ActionRowBuilder<ButtonBuilder>[] = canInstall ? [] : [
+            new ActionRowBuilder<ButtonBuilder>().addComponents(
                 new ButtonBuilder()
                     .setCustomId(SETTINGS_BUTTON_ID)
                     .setLabel('Settings')
                     .setStyle(ButtonStyle.Secondary)
-            ));
-        }
+            )
+        ];
 
         const payload = {
-            content: sanitizeDiscordText(lines.join('\n')).slice(0, 1900),
+            content: sanitizeDiscordText(canInstall ? `${baseLine} Installing now.` : baseLine).slice(0, 1900),
             embeds: [],
             attachments: [],
             components
         };
+        let message: Message | null = null;
 
         if (target instanceof Message) {
-            const message = await target.edit(payload).catch(async () => {
+            message = await target.edit(payload).catch(async () => {
                 return (target.channel as any).send(payload);
             });
-            this.scheduleComponentExpiry(message as Message, components.length > 0);
-            return message as Message;
+        } else {
+            message = await target.editReply(payload) as Message;
         }
 
-        const messageResult = await target.editReply(payload);
-        this.scheduleComponentExpiry(messageResult as Message, components.length > 0);
+        this.scheduleComponentExpiry(message, components.length > 0);
 
-        return messageResult as Message;
+        if (canInstall && result.installCommand) {
+            await this.installProviderAndRetry(message || target, {
+                ...retry,
+                installAttempted: true
+            }, {
+                command: result.installCommand,
+                executable,
+                label: result.installLabel || `Install ${provider}`
+            });
+        }
+
+        return message;
     }
 
-    private async installProviderAndRetry(interaction: ButtonInteraction, installId: string): Promise<void> {
+    private async installProviderFromButton(interaction: ButtonInteraction, installId: string): Promise<void> {
         const pending = pendingProviderInstalls.get(installId);
 
         if (!pending || pending.expiresAt < Date.now()) {
@@ -1900,44 +1950,62 @@ export class DiscordCodexBridge {
         }
         pendingProviderInstalls.delete(installId);
         await interaction.deferUpdate();
-        await interaction.editReply({
-            content: `Installing ${pending.label}...\n\`${pending.command}\``,
-            embeds: [],
-            attachments: [],
-            components: []
-        });
+        await this.installProviderAndRetry(interaction.message as Message, pending.retry, pending);
+    }
 
+    private async installProviderAndRetry(target: ResponseTarget, retry: LimitRetry, install: Pick<PendingProviderInstall, 'command' | 'executable' | 'label'>): Promise<void> {
         try {
-            await execFileAsync('sh', ['-lc', pending.command], {
-                cwd: this.config.defaultWorkspace,
+            await execFileAsync('sh', ['-lc', install.command], {
+                cwd: this.getRetryWorkspace(retry),
                 timeout: 5 * 60 * 1000,
                 maxBuffer: 128 * 1024
             });
         } catch (error) {
-            await interaction.editReply({
-                content: `Install failed for \`${pending.executable}\`.\n\n${this.trimError(error instanceof Error ? error.message : String(error))}`,
+            await this.editResponseTarget(target, {
+                content: `Install failed for ${install.executable}.`,
                 components: []
             });
             return;
         }
 
-        await interaction.editReply({
-            content: `Installed ${pending.label}. Retrying now.`,
+        await this.editResponseTarget(target, {
+            content: `Installed ${install.label}. Retrying now.`,
             components: []
         });
-        await this.runProviderInstallRetry(interaction, pending.retry);
+        setTimeout(() => {
+            void this.runProviderInstallRetry(target, retry);
+        }, 0);
     }
 
-    private async runProviderInstallRetry(interaction: ButtonInteraction, retry: LimitRetry): Promise<void> {
+    private async runProviderInstallRetry(target: ResponseTarget, retry: LimitRetry): Promise<void> {
         if (retry.kind === 'review') {
-            await this.runReview(interaction.message as Message, retry.options);
+            await this.runReview(target, {
+                ...retry.options,
+                providerInstallAttempted: true
+            } as CodexReviewOptions);
             return;
         }
 
-        await this.runPrompt(interaction.message as Message, retry.conversationKey, retry.prompt, {
+        await this.runPrompt(target, retry.conversationKey, retry.prompt, {
             ...retry.options,
-            fresh: false
+            fresh: false,
+            providerInstallAttempted: true
         });
+    }
+
+    private getRetryWorkspace(retry: LimitRetry): string {
+        if (retry.kind === 'prompt') return retry.options.workspace || this.config.defaultWorkspace;
+
+        return retry.options.workspace || this.config.defaultWorkspace;
+    }
+
+    private async editResponseTarget(target: ResponseTarget, payload: { content: string; components: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] }): Promise<void> {
+        if (target instanceof Message) {
+            await target.edit(payload).catch(() => undefined);
+            return;
+        }
+
+        await target.editReply(payload).catch(() => undefined);
     }
 
     private async runPendingLimitRetry(interaction: ComponentInteraction, retryId: string, overrides: Partial<PromptOptions>): Promise<void> {
@@ -2075,7 +2143,8 @@ export class DiscordCodexBridge {
     private async startEmptyConversationThread(message: Message): Promise<void> {
         if (!message.guild || message.channel.isThread()) return;
         const project = await this.resolveProject();
-        const thread = await this.createThread(message.channel as TextChannel, `${this.botName} conversation`);
+        const chatName = await this.createFallbackChatName(message.author.username);
+        const thread = await this.createThread(message.channel as TextChannel, chatName);
 
         await saveConversation({
             discordChannelId: thread.id,
@@ -2083,7 +2152,8 @@ export class DiscordCodexBridge {
             discordThreadId: thread.id,
             latestMessageId: null,
             codexThreadId: '',
-            name: this.getChatName(thread.name),
+            name: chatName,
+            requesterName: message.author.username,
             workspace: project.workspace,
             model: project.model || null,
             updatedAt: new Date().toISOString()
@@ -2091,12 +2161,12 @@ export class DiscordCodexBridge {
         await message.reply(`Opened ${thread.url}`);
         const setupMessage = await thread.send({
             content: `Choose the project for this conversation, then send the first prompt here.`,
-            components: [await this.createThreadWorkspaceRow(project.workspace)]
+            components: await this.createThreadWorkspaceRows(project.workspace)
         });
         this.scheduleComponentExpiry(setupMessage, true);
     }
 
-    private async createThreadWorkspaceRow(activeValue?: string): Promise<ActionRowBuilder<StringSelectMenuBuilder>> {
+    private async createThreadWorkspaceRows(activeValue?: string): Promise<ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[]> {
         const { activeProjectName, projects } = await listProjects();
         const activeProject = activeValue ? await findProject(activeValue) : null;
         const activeName = activeProject?.name.trim().toLowerCase() || activeProjectName || '';
@@ -2106,22 +2176,25 @@ export class DiscordCodexBridge {
             description: this.shortenPathTarget(project.workspace).slice(0, 100),
             default: project.name.trim().toLowerCase() === activeName
         }));
+        const rows: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] = [];
 
-        if (options.length === 0) {
-            options.push({
-                label: 'Default workspace',
-                value: '__default_workspace__',
-                description: this.shortenPathTarget(this.config.defaultWorkspace).slice(0, 100),
-                default: true
-            });
+        if (options.length > 0) {
+            rows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                new StringSelectMenuBuilder()
+                    .setCustomId(THREAD_WORKSPACE_SELECT_ID)
+                    .setPlaceholder('Project for this conversation')
+                    .addOptions(options)
+            ));
         }
 
-        return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-            new StringSelectMenuBuilder()
-                .setCustomId(THREAD_WORKSPACE_SELECT_ID)
-                .setPlaceholder('Project for this conversation')
-                .addOptions(options)
-        );
+        rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+                .setCustomId(THREAD_WORKSPACE_ADD_BUTTON_ID)
+                .setLabel('Create workspace')
+                .setStyle(ButtonStyle.Primary)
+        ));
+
+        return rows;
     }
 
     private async showConversationPicker(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -2133,7 +2206,7 @@ export class DiscordCodexBridge {
         }
 
         const visibleConversations = conversations.slice(0, 25);
-        const chatNames = await Promise.all(visibleConversations.map(conversation => this.getConversationDisplayName(conversation)));
+        const chatNames = await Promise.all(visibleConversations.map((conversation, index) => this.getConversationDisplayName(conversation, index + 1)));
         const options = visibleConversations.map((conversation, index) => ({
             label: `${index + 1}. ${chatNames[index]}`.slice(0, 100),
             value: conversation.codexThreadId,
@@ -2157,7 +2230,7 @@ export class DiscordCodexBridge {
     private async showChatsDashboard(interaction: ChatInputCommandInteraction): Promise<void> {
         await interaction.deferReply(await this.getSlashReplyOptions());
         const conversations = await listConversations();
-        const chatNames = await Promise.all(conversations.slice(0, 25).map(conversation => this.getConversationDisplayName(conversation)));
+        const chatNames = await Promise.all(conversations.slice(0, 25).map((conversation, index) => this.getConversationDisplayName(conversation, index + 1)));
         const image = await renderChatCard(conversations.slice(0, 25).map((conversation, index) => ({
             index: index + 1,
             name: chatNames[index],
@@ -2324,7 +2397,7 @@ export class DiscordCodexBridge {
                     new StringSelectMenuBuilder()
                         .setCustomId(ADD_ACCOUNT_PROVIDER_SELECT_ID)
                         .setPlaceholder('Provider')
-                        .addOptions(providerChoices.map(choice => ({
+                        .addOptions(accountProviderChoices.map(choice => ({
                             label: choice.label,
                             value: choice.value,
                             description: choice.description
@@ -2335,7 +2408,7 @@ export class DiscordCodexBridge {
         });
     }
 
-    private createAddAccountModal(provider: ProviderType): ModalBuilder {
+    private createAddAccountModal(provider: AccountProvider): ModalBuilder {
         return new ModalBuilder()
             .setCustomId(`${ADD_ACCOUNT_MODAL_ID}:${provider}`)
             .setTitle(`Add ${this.capitalize(provider)} account`)
@@ -2426,7 +2499,7 @@ export class DiscordCodexBridge {
                 default: false
             },
             {
-                label: 'Config default',
+                label: 'Provider default',
                 value: DEFAULT_MODEL_CHOICE,
                 description: 'Use the configured provider default.',
                 default: activeModel === DEFAULT_MODEL_CHOICE
@@ -2463,7 +2536,10 @@ export class DiscordCodexBridge {
 
     private async getModelChoices(provider: ProviderType): Promise<ModelChoiceMetadata[]> {
         try {
-            const catalog = await listAvailableModels(provider);
+            const accountEnv = provider === 'discode'
+                ? await this.accounts.getActiveEnvironment()
+                : await this.accounts.getActiveEnvironment(provider);
+            const catalog = await listAvailableModels(provider, false, { ...process.env, ...accountEnv });
 
             if (catalog.length > 0) return this.uniqueModelChoices(catalog);
         } catch (error) {
@@ -3063,11 +3139,14 @@ export class DiscordCodexBridge {
 
     private async createWorkspaceDashboard(): Promise<DashboardView> {
         const { activeProjectName, projects } = await listProjects();
-        const active = await getActiveProject() || { name: 'Default', workspace: this.config.defaultWorkspace, model: this.config.defaultModel, updatedAt: new Date().toISOString() };
-        const git = await this.getGitStatus(active.workspace);
+        const active = await getActiveProject();
+        const activeWorkspace = active?.workspace || '';
+        const git = activeWorkspace
+            ? await this.getGitStatus(activeWorkspace)
+            : { branch: '', changes: 0, ahead: 0, behind: 0, clean: true, available: false };
         const image = await renderWorkspaceCard({
-            activeName: active.name,
-            activeWorkspace: active.workspace,
+            activeName: active?.name || 'No workspace selected',
+            activeWorkspace: activeWorkspace || 'Create a workspace to start',
             git,
             projects: projects.map((project, index) => ({
                 index: index + 1,
@@ -3832,7 +3911,7 @@ export class DiscordCodexBridge {
 
         const modelChoices = await this.getModelChoices(provider);
         const modelOptions = [
-            { name: 'Config default', value: DEFAULT_MODEL_CHOICE, provider: 'Config', reasoning: false, toolCall: false },
+            { name: 'Provider default', value: DEFAULT_MODEL_CHOICE, provider: 'Runtime', reasoning: false, toolCall: false },
             ...modelChoices.filter(choice => choice.value !== DEFAULT_MODEL_CHOICE)
         ];
 
@@ -3852,7 +3931,7 @@ export class DiscordCodexBridge {
             new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
                 new StringSelectMenuBuilder()
                     .setCustomId(PROVIDER_SELECT_ID)
-                    .setPlaceholder(`Wrapper: ${this.capitalize(provider)}`)
+                    .setPlaceholder(`Harness: ${this.capitalize(provider)}`)
                     .addOptions(providerChoices.map(choice => ({
                         label: choice.label,
                         value: choice.value,
@@ -3898,10 +3977,10 @@ export class DiscordCodexBridge {
         return 'OPENAI_API_KEY';
     }
 
-    private createWorkspaceModal(): ModalBuilder {
+    private createWorkspaceModal(source: 'dashboard' | 'thread' = 'dashboard'): ModalBuilder {
         return new ModalBuilder()
-            .setCustomId(WORKSPACE_ADD_MODAL_ID)
-            .setTitle('Add directory')
+            .setCustomId(source === 'thread' ? `${WORKSPACE_ADD_MODAL_ID}:thread` : WORKSPACE_ADD_MODAL_ID)
+            .setTitle(source === 'thread' ? 'Create workspace' : 'Add directory')
             .addComponents(
                 new ActionRowBuilder<TextInputBuilder>().addComponents(
                     new TextInputBuilder()
@@ -3938,7 +4017,7 @@ export class DiscordCodexBridge {
                 new ActionRowBuilder<TextInputBuilder>().addComponents(
                     new TextInputBuilder()
                         .setCustomId('model')
-                        .setLabel('Model name, or blank for config default')
+                        .setLabel('Model name, or blank for provider default')
                         .setStyle(TextInputStyle.Short)
                         .setValue(model.slice(0, 100))
                         .setRequired(false)
@@ -4503,8 +4582,11 @@ export class DiscordCodexBridge {
             .replace(/[^\w\s.-]/g, '')
             .replace(/\s+/g, ' ')
             .trim();
+        const base = normalized
+            .replace(new RegExp(`^${this.escapeRegExp(this.commandName)}[-\\s]+`, 'i'), '')
+            .trim();
 
-        return `${this.commandName}-${(normalized || 'chat').slice(0, 72)}`;
+        return `${this.commandName}-${(base || 'chat').slice(0, 72)}`;
     }
 
     private isAgentThreadName(name: string): boolean {
@@ -4553,6 +4635,28 @@ export class DiscordCodexBridge {
         return words || (hadContext ? 'Review Discord context' : 'New chat');
     }
 
+    private async getUsefulChatName(prompt: string, username?: string | null): Promise<string> {
+        const name = this.getChatName(prompt);
+
+        return this.isWeakChatName(name) ? this.createFallbackChatName(username) : name;
+    }
+
+    private async createFallbackChatName(username?: string | null): Promise<string> {
+        const conversations = await listConversations();
+
+        return this.formatFallbackChatName(username, conversations.length + 1);
+    }
+
+    private formatFallbackChatName(username?: string | null, index = 1): string {
+        const cleanUser = (username || 'user')
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .slice(0, 24) || 'user';
+
+        return `chat-${cleanUser} #${Math.max(1, index)}`;
+    }
+
     private selectConversationName(existingName: string | undefined, requestedName: string | undefined, prompt: string): string {
         const promptName = this.getChatName(prompt);
 
@@ -4572,7 +4676,9 @@ export class DiscordCodexBridge {
 
         return /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(normalized)
             || normalized.length < 8
-            || ['chat', 'new chat', 'yo', 'hi', 'hey', 'hello', 'start', 'morefeinn'].includes(normalized);
+            || /^(?:(?:codex|discode)[\s.-]+)*conversation$/.test(normalized)
+            || /^start a fresh \w+ conversation\b/.test(normalized)
+            || ['chat', 'new chat', 'saved chat', 'yo', 'hi', 'hey', 'hello', 'start', 'morefeinn'].includes(normalized);
     }
 
     private async renameThreadIfUseful(target: ResponseTarget, name: string): Promise<void> {
@@ -4619,7 +4725,7 @@ export class DiscordCodexBridge {
         return name && !this.isWeakChatName(name) ? name : this.getChatName(chat.codexThreadId);
     }
 
-    private async getConversationDisplayName(chat: ConversationRecord): Promise<string> {
+    private async getConversationDisplayName(chat: ConversationRecord, index = 1): Promise<string> {
         const stored = this.getConversationName(chat);
 
         if (!this.isWeakChatName(stored)) return stored;
@@ -4628,7 +4734,7 @@ export class DiscordCodexBridge {
 
         if (userMessage) return this.getChatName(userMessage.text);
 
-        return 'Saved chat';
+        return this.formatFallbackChatName(chat.requesterName, index);
     }
 
     private createConversationLink(chat: ConversationRecord, fallbackGuildId?: string): string {

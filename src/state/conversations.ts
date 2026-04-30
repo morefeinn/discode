@@ -8,6 +8,7 @@ export interface ConversationRecord {
     latestMessageId?: string | null;
     codexThreadId: string;
     name: string;
+    requesterName?: string | null;
     workspace: string;
     model?: string | null;
     updatedAt: string;

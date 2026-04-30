@@ -24,14 +24,17 @@ interface ModelsDevProvider {
     }>;
 }
 
+type ModelEnv = Record<string, string | undefined>;
+
 const cachePath = path.resolve('data', 'models-dev-cache.json');
 const cacheTtlMs = 24 * 60 * 60 * 1000;
 const modelsUrl = process.env.DISCODE_MODELS_URL?.trim() || 'https://models.dev/api.json';
 
-export async function listAvailableModels(provider: ProviderType, refresh = false): Promise<ModelChoiceMetadata[]> {
+export async function listAvailableModels(provider: ProviderType, refresh = false, env: ModelEnv = process.env): Promise<ModelChoiceMetadata[]> {
+    const liveModels = await readProviderApiModels(provider, env).catch(() => []);
     const providers: Record<string, ModelsDevProvider> = await readModelsDev(refresh).catch(() => ({}));
     const providerIds = providerIdsFor(provider, providers);
-    const values: ModelChoiceMetadata[] = [];
+    const values: ModelChoiceMetadata[] = [...liveModels];
 
     for (const providerId of providerIds) {
         const providerData = providers[providerId];
@@ -43,7 +46,7 @@ export async function listAvailableModels(provider: ProviderType, refresh = fals
             if (!id) continue;
             values.push({
                 name: model.name || id,
-                value: provider === 'opencode' ? `${providerId}/${id}` : id,
+                value: provider === 'opencode' || provider === 'discode' ? `${providerId}/${id}` : id,
                 provider: providerData.name || providerId,
                 reasoning: model.reasoning === true,
                 toolCall: model.tool_call === true
@@ -51,7 +54,7 @@ export async function listAvailableModels(provider: ProviderType, refresh = fals
         }
     }
 
-    return (values.length > 0 ? values : fallbackModels(provider))
+    return uniqueModels(values)
         .sort((left, right) => score(right) - score(left) || left.name.localeCompare(right.name));
 }
 
@@ -88,7 +91,7 @@ function providerIdsFor(provider: ProviderType, providers: Record<string, Models
     if (provider === 'anthropic') return ['anthropic'];
     if (provider === 'zai') return ['z-ai', 'zai'].filter(id => providers[id]);
     if (provider === 'qwen') return ['alibaba', 'qwen'].filter(id => providers[id]);
-    if (provider === 'opencode') return Object.keys(providers);
+    if (provider === 'opencode' || provider === 'discode') return Object.keys(providers);
 
     return ['openai'];
 }
@@ -106,21 +109,130 @@ function score(model: ModelChoiceMetadata): number {
     return score;
 }
 
-function fallbackModels(provider: ProviderType): ModelChoiceMetadata[] {
-    const values: Record<ProviderType, string[]> = {
-        codex: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.2'],
-        opencode: ['openai/gpt-5.5', 'openai/gpt-5.4', 'anthropic/claude-sonnet-4-5', 'qwen/qwen3-coder-plus', 'z-ai/glm-4.6'],
-        anthropic: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5'],
-        zai: ['glm-4.6', 'glm-4.5'],
-        qwen: ['qwen3-coder-plus', 'qwen3-max', 'qwen3-plus'],
-        custom: []
-    };
+function uniqueModels(models: ModelChoiceMetadata[]): ModelChoiceMetadata[] {
+    const seen = new Set<string>();
 
-    return (values[provider] || values.codex).map(value => ({
-        name: value,
-        value,
-        provider: provider === 'custom' ? 'Custom' : provider,
-        reasoning: /gpt-5|claude|glm|qwen3/i.test(value),
-        toolCall: provider !== 'custom'
-    }));
+    return models.filter(model => {
+        const value = model.value.trim();
+
+        if (!value || seen.has(value)) return false;
+        seen.add(value);
+        model.value = value.slice(0, 100);
+        model.name = (model.name || value).slice(0, 100);
+
+        return true;
+    });
+}
+
+async function readProviderApiModels(provider: ProviderType, env: ModelEnv): Promise<ModelChoiceMetadata[]> {
+    const request = providerModelRequest(provider, env);
+
+    if (!request) return [];
+    const response = await fetch(request.url, { headers: request.headers });
+
+    if (!response.ok) throw new Error(`Could not fetch ${provider} models: HTTP ${response.status}`);
+    const parsed = await response.json() as any;
+    const data = Array.isArray(parsed?.data) ? parsed.data : Array.isArray(parsed?.models) ? parsed.models : Array.isArray(parsed) ? parsed : [];
+
+    return data
+        .map((model: any) => {
+            const id = stringValue(model?.id) || stringValue(model?.model) || stringValue(model?.name);
+
+            if (!id) return null;
+
+            return {
+                name: stringValue(model?.display_name) || stringValue(model?.name) || id,
+                value: (provider === 'opencode' || provider === 'discode') && !id.includes('/') ? `${request.providerId}/${id}` : id,
+                provider: request.label,
+                reasoning: /reason|thinking|gpt-[5-9]|claude|glm|qwen3/i.test(`${id} ${model?.name || ''}`),
+                toolCall: true
+            } satisfies ModelChoiceMetadata;
+        })
+        .filter(Boolean) as ModelChoiceMetadata[];
+}
+
+function providerModelRequest(provider: ProviderType, env: ModelEnv): { url: string; providerId: string; label: string; headers: Record<string, string> } | null {
+    if (provider === 'anthropic') {
+        const key = env.ANTHROPIC_API_KEY?.trim();
+
+        if (!key) return null;
+        return {
+            url: `${trimSlash(env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com')}/v1/models`,
+            providerId: 'anthropic',
+            label: 'Anthropic',
+            headers: {
+                'x-api-key': key,
+                'anthropic-version': env.ANTHROPIC_VERSION || '2023-06-01'
+            }
+        };
+    }
+
+    const openAiStyle = openAiStyleRequest(provider, env);
+
+    return openAiStyle;
+}
+
+function openAiStyleRequest(provider: ProviderType, env: ModelEnv): { url: string; providerId: string; label: string; headers: Record<string, string> } | null {
+    const values: Record<ProviderType, { key?: string; base?: string; providerId: string; label: string }> = {
+        discode: {
+            key: env.OPENAI_API_KEY,
+            base: env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+            providerId: 'openai',
+            label: 'OpenAI'
+        },
+        codex: {
+            key: env.OPENAI_API_KEY,
+            base: env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+            providerId: 'openai',
+            label: 'OpenAI'
+        },
+        opencode: {
+            key: env.OPENAI_API_KEY,
+            base: env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+            providerId: 'openai',
+            label: 'OpenAI'
+        },
+        zai: {
+            key: env.ZAI_API_KEY,
+            base: env.ZAI_BASE_URL || 'https://api.z.ai/api/paas/v4',
+            providerId: 'z-ai',
+            label: 'Z.ai'
+        },
+        qwen: {
+            key: env.QWEN_API_KEY || env.DASHSCOPE_API_KEY,
+            base: env.QWEN_BASE_URL || env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            providerId: 'qwen',
+            label: 'Qwen'
+        },
+        anthropic: {
+            providerId: 'anthropic',
+            label: 'Anthropic'
+        },
+        custom: {
+            key: env.OPENAI_API_KEY,
+            base: env.OPENAI_BASE_URL,
+            providerId: 'custom',
+            label: 'Custom'
+        }
+    };
+    const value = values[provider];
+    const key = value.key?.trim();
+    const base = value.base?.trim();
+
+    if (!key || !base) return null;
+
+    return {
+        url: `${trimSlash(base)}/models`,
+        providerId: value.providerId,
+        label: value.label,
+        headers: { authorization: `Bearer ${key}` }
+    };
+}
+
+function stringValue(value: unknown): string {
+    return typeof value === 'string' ? value.trim() : '';
+}
+
+function trimSlash(value: string): string {
+    return value.replace(/\/+$/g, '');
 }

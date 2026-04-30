@@ -11,6 +11,7 @@ import { checkForUpdate, formatUpdateNotice } from './update/checker.js';
 
 const config = loadConfig();
 const colorEnabled = process.stdout.isTTY && process.env.NO_COLOR !== '1' && process.env.NO_COLOR !== 'true';
+const packageJson = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8')) as { version?: string };
 const color = (value: string, code: string): string => colorEnabled ? `${code}${value}\x1b[0m` : value;
 const ok = (value: string): void => console.log(`${color('ok', '\x1b[32m')} ${value}`);
 const info = (value: string): void => console.log(`${color('info', '\x1b[36m')} ${value}`);
@@ -28,7 +29,7 @@ if (config.allowedUserIds.length === 0) {
     throw new Error('ALLOWED_USER_IDS is required. Add at least one Discord user id to .env or the process environment.');
 }
 
-const accounts = new AccountRouter(config.accountsPath, config.codexAuthPath, config.legacySwitcherImportPath);
+const accounts = new AccountRouter(config.accountsPath, config.codexAuthPath);
 const runner = new CodexRunner(config, accounts);
 const bridge = new DiscordCodexBridge(config, runner, accounts);
 const client = new Client({
@@ -47,7 +48,9 @@ client.once(Events.ClientReady, async () => {
     try {
         const registered = await registerSlashCommands(config, botName, [...client.guilds.cache.keys()]);
         bridge.setBotIdentity(botName, registered.primaryName);
+        console.log(color(`\nDiscode ${packageJson.version || ''}`.trim(), '\x1b[1m'));
         ok(`gateway connected as ${client.user?.tag}`);
+        info(`command /${registered.primaryName}`);
         info(`providers ${await providerSummary()}`);
         info(`usage ${formatNumber(readStoredTokenUsage())} tokens`);
         const updateStatus = await checkForUpdate(process.cwd());

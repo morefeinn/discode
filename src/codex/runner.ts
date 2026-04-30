@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { BridgeConfig } from '../config.js';
 import { getBridgeSettings, getEffectiveAutoSwitchOnLimit, getEffectiveProviderPriority, PermissionMode, ProviderType } from '../state/settings.js';
 import { AccountProvider, AccountRouter } from '../accounts/router.js';
+import { runNativeHarness } from '../harness/native.js';
 
 export interface CodexRunOptions {
     prompt?: string;
@@ -90,8 +91,10 @@ export class CodexRunner {
             return firstResult;
         }
 
-        const limitedAccount = await this.accounts.getActiveAccount();
-        const nextAccount = await this.accounts.switchToNext();
+        const provider = await this.getProvider(options.provider);
+        const accountScope = this.getAccountScope(provider);
+        const limitedAccount = await this.accounts.getActiveAccount(accountScope);
+        const nextAccount = await this.accounts.switchToNext(accountScope);
 
         if (nextAccount && nextAccount.id !== limitedAccount?.id) {
             const retryResult = await run();
@@ -121,8 +124,8 @@ export class CodexRunner {
             return firstResult;
         }
 
-        const limitedAccount = await this.accounts.getActiveAccount();
-        const nextAccount = await this.accounts.switchToNext();
+        const limitedAccount = await this.accounts.getActiveAccount('codex');
+        const nextAccount = await this.accounts.switchToNext('codex');
 
         if (!nextAccount) return firstResult;
         const retryResult = await run();
@@ -175,6 +178,7 @@ export class CodexRunner {
     private async runPromptOnce(options: CodexRunOptions): Promise<CodexRunResult> {
         const provider = await this.getProvider(options.provider);
 
+        if (provider === 'discode') return this.runNativePromptOnce(options);
         if (provider !== 'codex') return this.runExternalPromptOnce(provider, options);
 
         const workspace = options.workspace || this.config.defaultWorkspace;
@@ -335,16 +339,7 @@ export class CodexRunner {
 
         if (this.config.defaultModel) return this.config.defaultModel;
 
-        try {
-            const configPath = path.join(os.homedir(), '.codex', 'config.toml');
-            const configText = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
-            const match = configText.match(/^\s*model\s*=\s*"([^"]+)"/m);
-
-            if (match) return match[1];
-        } catch {
-        }
-
-        return 'config default';
+        return '';
     }
 
     private addAutoArgs(args: string[], dangerous: boolean | undefined, permissionMode?: PermissionMode): void {
@@ -370,7 +365,7 @@ export class CodexRunner {
         let threadId: string | null = null;
         let usage: CodexUsage | null = null;
 
-        const accountEnv = await this.accounts.getActiveEnvironment();
+        const accountEnv = await this.accounts.getActiveEnvironment('codex');
         const code = await new Promise<number>(resolve => {
             const child = spawn(this.config.codexBin, args, {
                 cwd: workspace,
@@ -478,10 +473,24 @@ export class CodexRunner {
         };
     }
 
+    private async runNativePromptOnce(options: CodexRunOptions): Promise<CodexRunResult> {
+        const workspace = options.workspace || this.config.defaultWorkspace;
+        const result = await runNativeHarness(this.accounts, options, workspace);
+
+        return {
+            ok: result.ok,
+            text: result.text || result.error || '',
+            error: result.ok ? undefined : result.error || result.text,
+            provider: 'discode',
+            usage: result.usage,
+            model: result.model
+        };
+    }
+
     private async spawnExternalProvider(provider: ProviderType, workspace: string, options: CodexRunOptions): Promise<ProcessResult> {
         let stdout = '';
         let stderr = '';
-        const accountEnv = await this.accounts.getActiveEnvironment();
+        const accountEnv = await this.accounts.getActiveEnvironment(this.getAccountScope(provider));
         const command = await this.getProviderCommand(provider, options);
         const code = await new Promise<number>(resolve => {
             let child;
@@ -557,19 +566,18 @@ export class CodexRunner {
 
     private async getProvider(provider: ProviderType | undefined): Promise<ProviderType> {
         if (this.isProviderType(provider)) return provider;
+        if (this.isProviderType(this.config.defaultProvider)) return this.config.defaultProvider;
         const accountProvider = await this.accounts.getActiveProvider();
 
         if (this.isAccountProvider(accountProvider)) {
             return accountProvider;
         }
 
-        if (this.isProviderType(this.config.defaultProvider)) return this.config.defaultProvider;
-
-        return 'codex';
+        return 'discode';
     }
 
     private async getProviderCommand(provider: ProviderType, options: CodexRunOptions): Promise<{ bin: string; args: string[] }> {
-        const accountCommand = await this.accounts.getActiveCommand();
+        const accountCommand = await this.accounts.getActiveCommand(this.getAccountScope(provider));
         const customCommand = accountCommand || this.config.providerCommand;
 
         if (provider === 'custom' && customCommand) {
@@ -607,7 +615,7 @@ export class CodexRunner {
         return { bin: 'sh', args: ['-lc', 'printf "%s\\n" "DISCODE_PROVIDER_COMMAND is required for the custom provider." >&2; exit 1'] };
     }
 
-    private isAccountProvider(provider: AccountProvider | null): provider is ProviderType {
+    private isAccountProvider(provider: AccountProvider | null): provider is AccountProvider {
         return provider === 'codex'
             || provider === 'opencode'
             || provider === 'anthropic'
@@ -617,12 +625,26 @@ export class CodexRunner {
     }
 
     private isProviderType(provider: string | undefined): provider is ProviderType {
-        return provider === 'codex'
+        return provider === 'discode'
+            || provider === 'codex'
             || provider === 'opencode'
             || provider === 'anthropic'
             || provider === 'zai'
             || provider === 'qwen'
             || provider === 'custom';
+    }
+
+    private getAccountScope(provider: ProviderType): AccountProvider | null {
+        if (provider === 'codex'
+            || provider === 'opencode'
+            || provider === 'anthropic'
+            || provider === 'zai'
+            || provider === 'qwen'
+            || provider === 'custom') {
+            return provider;
+        }
+
+        return null;
     }
 }
 
@@ -775,15 +797,11 @@ function formatSpawnError(provider: ProviderType, bin: string, error: unknown): 
 }
 
 function formatMissingExecutableMessage(provider: ProviderType, bin: string): string {
-    const install = providerInstall(provider);
-    const installText = install
-        ? `\n\nInstall option: ${install.command}`
-        : '\n\nNo automatic installer is configured for this provider. Add a command override or install the CLI manually.';
-
-    return `Executable not found in $PATH: "${bin}"${installText}`;
+    return `${providerLabel(provider, bin)} is not installed or is not on this bot process PATH.`;
 }
 
 function providerInstall(provider: ProviderType): { command: string; label: string } | null {
+    if (provider === 'discode') return null;
     if (provider === 'codex') return { command: 'bun add -g @openai/codex', label: 'Install Codex CLI' };
     if (provider === 'opencode') return { command: 'bun add -g opencode-ai', label: 'Install OpenCode CLI' };
     if (provider === 'anthropic') return { command: 'bun add -g @anthropic-ai/claude-code', label: 'Install Claude Code' };
@@ -791,6 +809,17 @@ function providerInstall(provider: ProviderType): { command: string; label: stri
     if (provider === 'qwen') return { command: 'bun add -g @qwen-code/qwen-code', label: 'Install Qwen Code' };
 
     return null;
+}
+
+function providerLabel(provider: ProviderType, bin: string): string {
+    if (provider === 'discode') return 'Discode native harness';
+    if (provider === 'codex') return 'Codex';
+    if (provider === 'opencode') return 'Opencode';
+    if (provider === 'anthropic') return 'Claude';
+    if (provider === 'zai') return 'Z.ai';
+    if (provider === 'qwen') return 'Qwen';
+
+    return bin.split(/[\\/]/).pop() || 'Provider';
 }
 
 function parseArgs(input: string): string[] {

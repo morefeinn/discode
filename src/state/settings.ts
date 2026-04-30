@@ -1,10 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
-export type ProviderType = 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'custom';
+export type ProviderType = 'discode' | 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'custom';
 export type PermissionMode = 'full' | 'directory' | 'auto-review';
 export type AgentNamingMode = 'greek' | 'custom';
 export type PersonalityMode = 'default' | 'direct' | 'concise' | 'thorough' | 'friendly' | 'custom';
@@ -44,7 +42,7 @@ interface SettingsFile {
 
 const dataPath = path.resolve('data', 'settings.json');
 export const DEFAULT_MODEL_CHOICE = '__default__';
-export const DEFAULT_PROVIDER_PRIORITY: ProviderType[] = ['codex', 'opencode', 'anthropic', 'zai', 'qwen', 'custom'];
+export const DEFAULT_PROVIDER_PRIORITY: ProviderType[] = ['discode', 'codex', 'anthropic', 'zai', 'qwen', 'opencode', 'custom'];
 export const DEFAULT_AGENT_NAMES = [
     'Apollo',
     'Athena',
@@ -111,26 +109,10 @@ export async function updateBridgeSettings(next: Partial<BridgeSettings>): Promi
 export function getConfiguredModel(defaultModel: string | null): string {
     if (defaultModel) return defaultModel;
 
-    try {
-        const configPath = path.join(os.homedir(), '.codex', 'config.toml');
-        const configText = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
-        const match = configText.match(/^\s*model\s*=\s*"([^"]+)"/m);
-
-        if (match) return match[1];
-    } catch {}
-
-    return 'config default';
+    return 'provider default';
 }
 
 export function getConfiguredReasoning(): ReasoningEffort {
-    try {
-        const configPath = path.join(os.homedir(), '.codex', 'config.toml');
-        const configText = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
-        const match = configText.match(/^\s*model_reasoning_effort\s*=\s*"([^"]+)"/m);
-
-        if (isReasoningEffort(match?.[1])) return match[1];
-    } catch {}
-
     return 'none';
 }
 
@@ -143,7 +125,7 @@ export function getEffectiveReasoning(settings: BridgeSettings): ReasoningEffort
 }
 
 export function getEffectiveProvider(settings: BridgeSettings, defaultProvider: string): ProviderType {
-    return isProviderType(settings.provider) ? settings.provider : isProviderType(defaultProvider) ? defaultProvider : 'codex';
+    return isProviderType(settings.provider) ? settings.provider : isProviderType(defaultProvider) ? defaultProvider : 'discode';
 }
 
 export function getEffectiveProviderPriority(settings: BridgeSettings, defaultPriority: ProviderType[] = DEFAULT_PROVIDER_PRIORITY): ProviderType[] {
@@ -247,7 +229,8 @@ export function isReasoningEffort(value: unknown): value is ReasoningEffort {
 }
 
 export function isProviderType(value: unknown): value is ProviderType {
-    return value === 'codex'
+    return value === 'discode'
+        || value === 'codex'
         || value === 'opencode'
         || value === 'anthropic'
         || value === 'zai'
@@ -260,7 +243,6 @@ export function isPermissionMode(value: unknown): value is PermissionMode {
 }
 
 export function listModelChoices(): ModelChoice[] {
-    const cachePath = path.join(os.homedir(), '.codex', 'models_cache.json');
     const values = new Set<string>();
     const configured = (process.env.DISCODE_MODEL_CHOICES || '').split(',');
 
@@ -268,19 +250,8 @@ export function listModelChoices(): ModelChoice[] {
         if (model.trim()) values.add(model.trim());
     }
 
-    try {
-        const parsed = JSON.parse(readFileSync(cachePath, 'utf8'));
-        const models = Array.isArray(parsed?.models) ? parsed.models : Array.isArray(parsed) ? parsed : [];
-
-        for (const model of models) {
-            const id = model?.id || model?.model || model?.name;
-
-            if (typeof id === 'string' && id.trim()) values.add(id.trim());
-        }
-    } catch {}
-
     return [
-        { name: 'Config default', value: DEFAULT_MODEL_CHOICE },
+        { name: 'Provider default', value: DEFAULT_MODEL_CHOICE },
         ...[...values].slice(0, 24).map(value => ({
             name: value,
             value
