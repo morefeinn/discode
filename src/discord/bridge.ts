@@ -2538,8 +2538,12 @@ export class DiscordCodexBridge {
                 const providers = await this.getConfiguredModelProviders();
                 const results = await Promise.all(providers.map(async item => {
                     const accountEnv = await this.accounts.getActiveEnvironment(item);
+                    const models = await listAvailableModels(item, false, { ...process.env, ...accountEnv }).catch(() => []);
 
-                    return listAvailableModels(item, false, { ...process.env, ...accountEnv }).catch(() => []);
+                    return models.map(model => ({
+                        ...model,
+                        value: `${item}:${model.value}`.slice(0, 100)
+                    }));
                 }));
                 const catalog = results.flat();
 
@@ -2602,13 +2606,21 @@ export class DiscordCodexBridge {
 
         return models.filter(model => {
             const value = model.value.slice(0, 100);
+            const key = this.canonicalModelChoiceKey(value);
 
-            if (seen.has(value)) return false;
-            seen.add(value);
+            if (seen.has(key)) return false;
+            seen.add(key);
             model.value = value;
 
             return true;
         });
+    }
+
+    private canonicalModelChoiceKey(value: string): string {
+        return value
+            .trim()
+            .toLowerCase()
+            .replace(/^(?:codex|openai|anthropic|zai|z-ai|qwen|alibaba|groq|custom):/, '');
     }
 
     private async showWorkspaceDashboard(interaction: ChatInputCommandInteraction | ModalSubmitInteraction): Promise<void> {

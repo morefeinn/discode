@@ -19,8 +19,14 @@ interface ModelsDevProvider {
         name?: string;
         reasoning?: boolean;
         tool_call?: boolean;
+        status?: string;
+        active?: boolean;
         release_date?: string;
         last_updated?: string;
+        modalities?: {
+            input?: string[];
+            output?: string[];
+        };
     }>;
 }
 
@@ -32,6 +38,11 @@ const modelsUrl = process.env.DISCODE_MODELS_URL?.trim() || 'https://models.dev/
 
 export async function listAvailableModels(provider: ProviderType, refresh = false, env: ModelEnv = process.env): Promise<ModelChoiceMetadata[]> {
     const liveModels = await readProviderApiModels(provider, env).catch(() => []);
+
+    if (liveModels.length > 0) {
+        return uniqueModels(liveModels)
+            .sort((left, right) => score(right) - score(left) || left.name.localeCompare(right.name));
+    }
     const providers: Record<string, ModelsDevProvider> = await readModelsDev(refresh).catch(() => ({}));
     const providerIds = providerIdsFor(provider, providers);
     const values: ModelChoiceMetadata[] = [...liveModels];
@@ -44,6 +55,7 @@ export async function listAvailableModels(provider: ProviderType, refresh = fals
             const id = model.id?.trim();
 
             if (!id) continue;
+            if (!isSupportedCatalogModel(model)) continue;
             values.push({
                 name: model.name || id,
                 value: provider === 'opencode' || provider === 'discode' ? `${providerId}/${id}` : id,
@@ -105,6 +117,8 @@ function score(model: ModelChoiceMetadata): number {
     if (model.reasoning) score += 100;
     if (model.toolCall) score += 50;
     if (value.includes('codex')) score += 40;
+    if (value.includes('gpt-oss-120b')) score += 80;
+    if (value.includes('gpt-oss')) score += 70;
     if (value.includes('claude') || value.includes('gpt') || value.includes('qwen') || value.includes('glm')) score += 25;
     if (value.includes('latest') || value.includes('5') || value.includes('4.5')) score += 10;
 
@@ -116,9 +130,10 @@ function uniqueModels(models: ModelChoiceMetadata[]): ModelChoiceMetadata[] {
 
     return models.filter(model => {
         const value = model.value.trim();
+        const key = canonicalModelKey(value);
 
-        if (!value || seen.has(value)) return false;
-        seen.add(value);
+        if (!value || seen.has(key)) return false;
+        seen.add(key);
         model.value = value.slice(0, 100);
         model.name = (model.name || value).slice(0, 100);
 
@@ -141,6 +156,8 @@ async function readProviderApiModels(provider: ProviderType, env: ModelEnv): Pro
             const id = stringValue(model?.id) || stringValue(model?.model) || stringValue(model?.name);
 
             if (!id) return null;
+            if (model?.active === false) return null;
+            if (!isLikelyChatModel(id)) return null;
 
             return {
                 name: stringValue(model?.display_name) || stringValue(model?.name) || id,
@@ -151,6 +168,37 @@ async function readProviderApiModels(provider: ProviderType, env: ModelEnv): Pro
             } satisfies ModelChoiceMetadata;
         })
         .filter(Boolean) as ModelChoiceMetadata[];
+}
+
+function isSupportedCatalogModel(model: {
+    id?: string;
+    name?: string;
+    status?: string;
+    active?: boolean;
+    modalities?: { input?: string[]; output?: string[] };
+}): boolean {
+    if (model.active === false) return false;
+    if (/decommission|deprecat|retired|sunset/i.test(model.status || '')) return false;
+    if (!isLikelyChatModel(`${model.id || ''} ${model.name || ''}`)) return false;
+
+    const input = model.modalities?.input;
+    const output = model.modalities?.output;
+
+    if (Array.isArray(input) && input.length > 0 && !input.includes('text')) return false;
+    if (Array.isArray(output) && output.length > 0 && !output.includes('text')) return false;
+
+    return true;
+}
+
+function isLikelyChatModel(value: string): boolean {
+    return !/\b(?:whisper|orpheus|tts|transcription|speech|audio)\b/i.test(value);
+}
+
+function canonicalModelKey(value: string): string {
+    return value
+        .trim()
+        .toLowerCase()
+        .replace(/^(?:codex|openai|anthropic|zai|z-ai|qwen|alibaba|groq|custom):/, '');
 }
 
 function providerModelRequest(provider: ProviderType, env: ModelEnv): { url: string; providerId: string; label: string; headers: Record<string, string> } | null {
