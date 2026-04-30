@@ -177,6 +177,7 @@ const MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
 const MODEL_BUTTON_ID = 'discode:model-panel';
 const REASONING_BUTTON_ID = 'discode:reasoning-panel';
 const MODEL_SELECT_ID = 'discode:set-model';
+const MODEL_PAGE_PREFIX = '__model_page__';
 const MODEL_CUSTOM_BUTTON_ID = 'discode:custom-model';
 const MODEL_CUSTOM_MODAL_ID = 'discode:custom-model-modal';
 const REASONING_SELECT_ID = 'discode:set-reasoning';
@@ -208,8 +209,6 @@ const CUSTOM_INSTRUCTIONS_MODAL_ID = 'discode:custom-instructions-modal';
 const ADD_ACCOUNT_BUTTON_ID = 'discode:add-account';
 const ADD_ACCOUNT_PROVIDER_SELECT_ID = 'discode:add-account-provider';
 const ADD_ACCOUNT_MODAL_ID = 'discode:add-account-modal';
-const MODEL_PICKER_PREV_ID = 'discode:model-prev';
-const MODEL_PICKER_NEXT_ID = 'discode:model-next';
 const ACCESS_APPROVE_ID = 'discode:approve-access';
 const CONVERSATION_SELECT_ID = 'discode:load-conversation';
 const CHAT_LINK_SELECT_ID = 'discode:chat-link';
@@ -240,6 +239,7 @@ const RESPONSE_CARD_PREV_ID = 'discode:response-prev';
 const RESPONSE_CARD_NEXT_ID = 'discode:response-next';
 const COMPONENT_IDLE_TTL_MS = 60 * 1000;
 const USAGE_DASHBOARD_TTL_MS = COMPONENT_IDLE_TTL_MS;
+const MODEL_SELECT_PAGE_SIZE = 22;
 const ACCOUNT_ADJECTIVES = ['North', 'Bright', 'Clear', 'Prime', 'Stone', 'Swift', 'True', 'Silver', 'Golden', 'Blue', 'Red', 'Green', 'Quiet', 'Open', 'Steady', 'Fresh'];
 const ACCOUNT_NOUNS = ['Harbor', 'Keystone', 'Beacon', 'Ledger', 'Vault', 'Signal', 'Bridge', 'Forge', 'Anchor', 'Summit', 'Field', 'Orbit', 'Relay', 'Crown', 'Path', 'Gate'];
 const AGENT_COLORS = ['#8b5cf6', '#10a37f', '#3b82f6', '#f59e0b', '#ec4899', '#14b8a6'];
@@ -690,16 +690,6 @@ export class DiscordCodexBridge {
             return;
         }
 
-        if (interaction.isButton() && (interaction.customId.startsWith(MODEL_PICKER_PREV_ID) || interaction.customId.startsWith(MODEL_PICKER_NEXT_ID))) {
-            await interaction.deferUpdate();
-            const parts = interaction.customId.split(':');
-            const page = Math.max(0, Number(parts.at(-1)) || 0);
-            const sessionId = parts.at(-2) || '';
-
-            await interaction.editReply(this.createModelPickerPayload(sessionId, page));
-            return;
-        }
-
         if (interaction.isButton() && interaction.customId === ACCESS_USERS_BUTTON_ID) {
             await interaction.showModal(await this.createAccessUsersModal());
             return;
@@ -983,9 +973,24 @@ export class DiscordCodexBridge {
             return;
         }
 
-        if (interaction.isStringSelectMenu() && interaction.customId === MODEL_SELECT_ID) {
-            await updateBridgeSettings({ model: interaction.values[0] === DEFAULT_MODEL_CHOICE ? null : interaction.values[0] });
-            await this.updateSettingsDashboard(interaction, 'runtime');
+        if (interaction.isStringSelectMenu() && interaction.customId.startsWith(MODEL_SELECT_ID)) {
+            const selected = interaction.values[0];
+            const modelSelect = this.parseModelSelectCustomId(interaction.customId);
+
+            if (selected.startsWith(`${MODEL_PAGE_PREFIX}:`)) {
+                const page = Math.max(0, Number(selected.split(':').at(-1)) || 0);
+
+                if (modelSelect.source === 'picker') {
+                    await interaction.deferUpdate();
+                    await interaction.editReply(this.createModelPickerPayload(modelSelect.sessionId, page));
+                } else {
+                    await this.updateSettingsDashboard(interaction, 'runtime', page);
+                }
+                return;
+            }
+
+            await updateBridgeSettings({ model: selected === DEFAULT_MODEL_CHOICE ? null : selected });
+            await this.updateSettingsDashboard(interaction, 'runtime', modelSelect.page);
             return;
         }
 
@@ -2237,18 +2242,10 @@ export class DiscordCodexBridge {
 
     private async showModelPicker(interaction: ButtonInteraction): Promise<void> {
         const settings = await getBridgeSettings();
-        const model = getEffectiveModel(settings, this.config.defaultModel);
+        const model = settings.model || DEFAULT_MODEL_CHOICE;
         const provider = getEffectiveProvider(settings, this.config.defaultProvider);
         const models = await this.getModelChoices(provider);
-        const sessionId = this.createUsageSessionId();
-        const pages = this.chunkModels(models, 23);
-
-        modelPickerSessions.set(sessionId, {
-            id: sessionId,
-            provider,
-            createdAt: Date.now(),
-            pages
-        });
+        const sessionId = this.createModelSession(provider, models);
 
         await interaction.reply({
             ...this.createModelPickerPayload(sessionId, 0, model),
@@ -2390,51 +2387,77 @@ export class DiscordCodexBridge {
                 components: []
             };
         }
-        const pageCount = Math.max(1, session.pages.length);
-        const normalizedPage = Math.min(Math.max(page, 0), pageCount - 1);
-        const models = (session.pages[normalizedPage] || []).filter(model => model.value !== DEFAULT_MODEL_CHOICE);
 
         session.createdAt = Date.now();
 
         return {
             content: '',
             components: [
-                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-                    new StringSelectMenuBuilder()
-                        .setCustomId(MODEL_SELECT_ID)
-                        .setPlaceholder(`Model page ${normalizedPage + 1}/${pageCount}`)
-                        .addOptions([
-                            {
-                                label: 'Config default',
-                                value: DEFAULT_MODEL_CHOICE,
-                                description: 'Use the configured provider default.',
-                                default: !activeModel || activeModel === 'config default'
-                            },
-                            ...models.map(model => ({
-                                label: model.name.slice(0, 100),
-                                value: model.value.slice(0, 100),
-                                description: `${model.provider}${model.reasoning ? ' · thinking' : ''}${model.toolCall ? ' · tools' : ''}`.slice(0, 100),
-                                default: activeModel === model.value
-                            }))
-                        ])
-                ),
+                this.createModelSelectRow(sessionId, page, activeModel || DEFAULT_MODEL_CHOICE, 'picker'),
                 new ActionRowBuilder<ButtonBuilder>().addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`${MODEL_PICKER_PREV_ID}:${sessionId}:${Math.max(0, normalizedPage - 1)}`)
-                        .setLabel('Previous')
-                        .setStyle(ButtonStyle.Secondary)
-                        .setDisabled(normalizedPage === 0),
-                    new ButtonBuilder()
-                        .setCustomId(`${MODEL_PICKER_NEXT_ID}:${sessionId}:${Math.min(pageCount - 1, normalizedPage + 1)}`)
-                        .setLabel('Next')
-                        .setStyle(ButtonStyle.Secondary)
-                        .setDisabled(normalizedPage >= pageCount - 1),
                     new ButtonBuilder()
                         .setCustomId(MODEL_CUSTOM_BUTTON_ID)
                         .setLabel('Custom model')
                         .setStyle(ButtonStyle.Secondary)
                 )
             ]
+        };
+    }
+
+    private createModelSelectRow(sessionId: string, page: number, activeModel: string, source: 'settings' | 'picker'): ActionRowBuilder<StringSelectMenuBuilder> {
+        const session = modelPickerSessions.get(sessionId);
+        const pages = session?.pages || [[]];
+        const pageCount = Math.max(1, pages.length);
+        const normalizedPage = Math.min(Math.max(page, 0), pageCount - 1);
+        const modelOptions = (pages[normalizedPage] || [])
+            .filter(model => model.value !== DEFAULT_MODEL_CHOICE)
+            .slice(0, MODEL_SELECT_PAGE_SIZE)
+            .map(model => ({
+                label: model.name.slice(0, 100),
+                value: model.value.slice(0, 100),
+                description: `${model.provider}${model.reasoning ? ' · reasoning' : ''}${model.toolCall ? ' · tools' : ''}`.slice(0, 100),
+                default: activeModel !== DEFAULT_MODEL_CHOICE && activeModel === model.value
+            }));
+        const options = [
+            {
+                label: normalizedPage <= 0 ? 'Previous page' : `Previous page (${normalizedPage}/${pageCount})`,
+                value: `${MODEL_PAGE_PREFIX}:${Math.max(0, normalizedPage - 1)}`,
+                description: normalizedPage <= 0 ? 'Already on the first page.' : 'Show earlier models.',
+                default: false
+            },
+            {
+                label: 'Config default',
+                value: DEFAULT_MODEL_CHOICE,
+                description: 'Use the configured provider default.',
+                default: activeModel === DEFAULT_MODEL_CHOICE
+            },
+            ...modelOptions,
+            {
+                label: normalizedPage >= pageCount - 1 ? 'Next page' : `Next page (${normalizedPage + 2}/${pageCount})`,
+                value: `${MODEL_PAGE_PREFIX}:${Math.min(pageCount - 1, normalizedPage + 1)}`,
+                description: normalizedPage >= pageCount - 1 ? 'Already on the last page.' : 'Show more models.',
+                default: false
+            }
+        ].slice(0, 25);
+
+        return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId(`${MODEL_SELECT_ID}:${source}:${sessionId}:${normalizedPage}`)
+                .setPlaceholder(`Model page ${normalizedPage + 1}/${pageCount}`)
+                .addOptions(options)
+        );
+    }
+
+    private parseModelSelectCustomId(customId: string): { source: 'settings' | 'picker'; sessionId: string; page: number } {
+        if (!customId.startsWith(`${MODEL_SELECT_ID}:`)) {
+            return { source: 'settings', sessionId: '', page: 0 };
+        }
+        const [, source, sessionId, page] = customId.slice(MODEL_SELECT_ID.length + 1).match(/^([^:]+):([^:]+):(\d+)$/) || [];
+
+        return {
+            source: source === 'picker' ? 'picker' : 'settings',
+            sessionId: sessionId || '',
+            page: Math.max(0, Number(page) || 0)
         };
     }
 
@@ -2454,6 +2477,20 @@ export class DiscordCodexBridge {
             reasoning: false,
             toolCall: false
         })));
+    }
+
+    private createModelSession(provider: ProviderType, models: ModelChoiceMetadata[]): string {
+        const sessionId = this.createUsageSessionId();
+
+        modelPickerSessions.set(sessionId, {
+            id: sessionId,
+            provider,
+            createdAt: Date.now(),
+            pages: this.chunkModels(models, MODEL_SELECT_PAGE_SIZE)
+        });
+        this.pruneModelPickerSessions();
+
+        return sessionId;
     }
 
     private uniqueModelChoices(models: ModelChoiceMetadata[]): ModelChoiceMetadata[] {
@@ -3081,7 +3118,7 @@ export class DiscordCodexBridge {
         };
     }
 
-    private async updateSettingsDashboard(interaction: StringSelectMenuInteraction, page: SettingsPage): Promise<void> {
+    private async updateSettingsDashboard(interaction: StringSelectMenuInteraction, page: SettingsPage, modelPage = 0): Promise<void> {
         const settings = await getBridgeSettings();
         const image = await renderSettingsCard(settings, this.config, page);
 
@@ -3089,7 +3126,7 @@ export class DiscordCodexBridge {
             content: '',
             embeds: [],
             attachments: [],
-            components: await this.createSettingsRows(page),
+            components: await this.createSettingsRows(page, modelPage),
             files: [new AttachmentBuilder(image, { name: `discode-settings-${page}.png` })]
         });
         this.scheduleComponentExpiry(interaction.message, true);
@@ -3249,6 +3286,17 @@ export class DiscordCodexBridge {
         for (const [id, session] of usageDashboardSessions) {
             if (now - session.createdAt > USAGE_DASHBOARD_TTL_MS) {
                 usageDashboardSessions.delete(id);
+            }
+        }
+        this.pruneModelPickerSessions();
+    }
+
+    private pruneModelPickerSessions(): void {
+        const now = Date.now();
+
+        for (const [id, session] of modelPickerSessions) {
+            if (now - session.createdAt > COMPONENT_IDLE_TTL_MS) {
+                modelPickerSessions.delete(id);
             }
         }
     }
@@ -3569,7 +3617,7 @@ export class DiscordCodexBridge {
         ];
     }
 
-    private async createSettingsRows(page: SettingsPage = 'runtime'): Promise<ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[]> {
+    private async createSettingsRows(page: SettingsPage = 'runtime', modelPage = 0): Promise<ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[]> {
         const settings = await getBridgeSettings();
         const model = getEffectiveModel(settings, this.config.defaultModel);
         const reasoning = getEffectiveReasoning(settings);
@@ -3585,31 +3633,12 @@ export class DiscordCodexBridge {
         const agentNamingMode: AgentNamingMode = settings.agentNamingMode === 'custom' ? 'custom' : 'greek';
         const personalityMode: PersonalityMode = isPersonalityMode(settings.personalityMode) ? settings.personalityMode : 'default';
         const memoryEnabled = settings.memoryEnabled !== false;
-        const modelChoices = await this.getModelChoices(provider);
-        const modelOptions = [
-            { name: 'Config default', value: DEFAULT_MODEL_CHOICE, provider: 'Config', reasoning: false, toolCall: false },
-            ...modelChoices.filter(choice => choice.value !== DEFAULT_MODEL_CHOICE)
-        ].map(choice => ({
-            label: choice.name.slice(0, 100),
-            value: choice.value,
-            description: `${choice.provider}${choice.reasoning ? ' · reasoning' : ''}${choice.toolCall ? ' · tools' : ''}`.slice(0, 100),
-            default: choice.value === DEFAULT_MODEL_CHOICE ? !settings.model : choice.value === model
-        }));
         const reasoningOptions = reasoningChoices.map(choice => ({
             label: choice.label,
             value: choice.value,
             description: choice.description,
             default: choice.value === reasoning
         }));
-
-        if (settings.model && !modelOptions.some(option => option.value === model)) {
-            modelOptions.unshift({
-                label: model.slice(0, 100),
-                value: model,
-                description: 'Custom model override',
-                default: true
-            });
-        }
 
         const pageRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
             new StringSelectMenuBuilder()
@@ -3801,6 +3830,23 @@ export class DiscordCodexBridge {
             ];
         }
 
+        const modelChoices = await this.getModelChoices(provider);
+        const modelOptions = [
+            { name: 'Config default', value: DEFAULT_MODEL_CHOICE, provider: 'Config', reasoning: false, toolCall: false },
+            ...modelChoices.filter(choice => choice.value !== DEFAULT_MODEL_CHOICE)
+        ];
+
+        if (settings.model && !modelOptions.some(option => option.value === model)) {
+            modelOptions.unshift({
+                name: model.slice(0, 100),
+                value: model,
+                provider: 'Custom',
+                reasoning: false,
+                toolCall: false
+            });
+        }
+        const modelSessionId = this.createModelSession(provider, modelOptions);
+
         return [
             pageRow,
             new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
@@ -3814,12 +3860,7 @@ export class DiscordCodexBridge {
                         default: choice.value === provider
                     })))
             ),
-            new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-                new StringSelectMenuBuilder()
-                    .setCustomId(MODEL_SELECT_ID)
-                    .setPlaceholder(`Model: ${model}`)
-                    .addOptions(modelOptions.slice(0, 25))
-            ),
+            this.createModelSelectRow(modelSessionId, modelPage, settings.model || DEFAULT_MODEL_CHOICE, 'settings'),
             new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
                 new StringSelectMenuBuilder()
                     .setCustomId(REASONING_SELECT_ID)
