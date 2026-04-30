@@ -1,4 +1,4 @@
-import sharp from 'sharp';
+import { renderSvgToPng } from './rendering.js';
 
 export interface ChatCardItem {
     index: number;
@@ -11,7 +11,7 @@ const WIDTH = 1200;
 const HEIGHT = 760;
 
 export async function renderChatCard(chats: ChatCardItem[]): Promise<Buffer> {
-    return sharp(Buffer.from(renderSvg(chats))).png().toBuffer();
+    return renderSvgToPng(renderSvg(chats));
 }
 
 function renderSvg(chats: ChatCardItem[]): string {

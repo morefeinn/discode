@@ -69,8 +69,8 @@ bun link
 
 if [ "${DISCODE_SETUP:-1}" != "0" ]; then
     if [ -r /dev/tty ] && [ -z "${DISCODE_SETUP_ARGS:-}" ]; then
-        bun bin/codex-bot.mjs setup < /dev/tty
+        bun bin/discode.mjs setup < /dev/tty
     else
-        bun bin/codex-bot.mjs setup ${DISCODE_SETUP_ARGS:-}
+        bun bin/discode.mjs setup ${DISCODE_SETUP_ARGS:-}
     fi
 fi

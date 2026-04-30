@@ -1,4 +1,4 @@
-import sharp from 'sharp';
+import { renderSvgToPng } from './rendering.js';
 
 const WIDTH = 1100;
 const HEIGHT = 860;
@@ -9,7 +9,7 @@ export async function renderFinalResponseCards(value: string, title = 'Discode')
     const lines = wrapResponse(cleanResponse(value));
     const pages = chunk(lines.length > 0 ? lines : ['Completed with no final message.'], MAX_LINES);
 
-    return Promise.all(pages.map((page, index) => sharp(Buffer.from(renderSvg(page, title, pages.length, index + 1))).png().toBuffer()));
+    return Promise.all(pages.map((page, index) => renderSvgToPng(renderSvg(page, title, pages.length, index + 1))));
 }
 
 function renderSvg(lines: string[], title: string, pageCount: number, page: number): string {

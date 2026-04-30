@@ -41,6 +41,10 @@ export interface CodexRunResult {
     text: string;
     threadId?: string | null;
     error?: string;
+    provider?: ProviderType;
+    missingExecutable?: string;
+    installCommand?: string;
+    installLabel?: string;
     switchedAccountName?: string;
     limitError?: string;
     limitAccountId?: string | null;
@@ -55,6 +59,9 @@ interface ProcessResult {
     stderr: string;
     threadId: string | null;
     usage: CodexUsage | null;
+    missingExecutable?: string;
+    installCommand?: string;
+    installLabel?: string;
 }
 
 export interface CodexUsage {
@@ -188,7 +195,8 @@ export class CodexRunner {
                     text: finalText,
                     threadId: threadId || options.codexThreadId || null,
                     usage: result.usage,
-                    model: this.getSelectedModel(options.model)
+                    model: this.getSelectedModel(options.model),
+                    provider
                 };
             }
 
@@ -198,6 +206,10 @@ export class CodexRunner {
                 threadId: threadId || options.codexThreadId || null,
                 usage: result.usage,
                 model: this.getSelectedModel(options.model),
+                provider,
+                missingExecutable: result.missingExecutable,
+                installCommand: result.installCommand,
+                installLabel: result.installLabel,
                 error: [finalText, extractJsonErrors(result.stdout), result.stderr]
                     .filter(Boolean)
                     .join('\n')
@@ -240,7 +252,8 @@ export class CodexRunner {
                     ok: true,
                     text: finalText,
                     usage: result.usage,
-                    model: this.getSelectedModel(options.model)
+                    model: this.getSelectedModel(options.model),
+                    provider: 'codex'
                 };
             }
 
@@ -249,6 +262,10 @@ export class CodexRunner {
                 text: finalText,
                 usage: result.usage,
                 model: this.getSelectedModel(options.model),
+                provider: 'codex',
+                missingExecutable: result.missingExecutable,
+                installCommand: result.installCommand,
+                installLabel: result.installLabel,
                 error: [finalText, extractJsonErrors(result.stdout), result.stderr]
                     .filter(Boolean)
                     .join('\n')
@@ -408,7 +425,13 @@ export class CodexRunner {
             child.on('error', error => {
                 clearTimeout(timeout);
                 signal?.removeEventListener('abort', abort);
-                stderr += String(error);
+                const missing = missingExecutableError(error, this.config.codexBin);
+
+                if (missing) {
+                    stderr += formatMissingExecutableMessage('codex', this.config.codexBin);
+                } else {
+                    stderr += String(error);
+                }
                 resolve(1);
             });
             child.on('close', exitCode => {
@@ -422,7 +445,19 @@ export class CodexRunner {
             stdout += `\n${await readFile(outputPath, 'utf8').catch(() => '')}`;
         }
 
-        return { code, stdout, stderr, threadId, usage };
+        const missingExecutable = executableMissingFromText(stderr, this.config.codexBin) ? this.config.codexBin : undefined;
+        const install = missingExecutable ? providerInstall('codex') : null;
+
+        return {
+            code,
+            stdout,
+            stderr,
+            threadId,
+            usage,
+            missingExecutable,
+            installCommand: install?.command,
+            installLabel: install?.label
+        };
     }
 
     private async runExternalPromptOnce(provider: ProviderType, options: CodexRunOptions): Promise<CodexRunResult> {
@@ -434,6 +469,10 @@ export class CodexRunner {
             ok: result.code === 0,
             text: text || `${provider} exited with status ${result.code}.`,
             error: result.code === 0 ? undefined : text,
+            provider,
+            missingExecutable: result.missingExecutable,
+            installCommand: result.installCommand,
+            installLabel: result.installLabel,
             usage: result.usage,
             model: options.model || provider
         };
@@ -482,7 +521,13 @@ export class CodexRunner {
             child.on('error', error => {
                 clearTimeout(timeout);
                 options.signal?.removeEventListener('abort', abort);
-                stderr += String(error);
+                const missing = missingExecutableError(error, command.bin);
+
+                if (missing) {
+                    stderr += formatMissingExecutableMessage(provider, command.bin);
+                } else {
+                    stderr += String(error);
+                }
                 resolve(1);
             });
             child.on('close', exitCode => {
@@ -493,7 +538,19 @@ export class CodexRunner {
             child.stdin.end(options.prompt || '');
         });
 
-        return { code, stdout, stderr, threadId: null, usage: null };
+        const missingExecutable = executableMissingFromText(stderr, command.bin) ? command.bin : undefined;
+        const install = missingExecutable ? providerInstall(provider) : null;
+
+        return {
+            code,
+            stdout,
+            stderr,
+            threadId: null,
+            usage: null,
+            missingExecutable,
+            installCommand: install?.command,
+            installLabel: install?.label
+        };
     }
 
     private async getProvider(provider: ProviderType | undefined): Promise<ProviderType> {
@@ -654,13 +711,14 @@ function normalizeUsage(usage: CodexUsage | undefined): CodexUsage | null {
     const cachedInputTokens = usage.cachedInputTokens ?? (usage as any).cached_input_tokens;
     const outputTokens = usage.outputTokens ?? (usage as any).output_tokens;
     const reasoningOutputTokens = usage.reasoningOutputTokens ?? (usage as any).reasoning_output_tokens;
+    const billableInputTokens = Math.max(0, (inputTokens || 0) - (cachedInputTokens || 0));
 
     return {
         inputTokens,
         cachedInputTokens,
         outputTokens,
         reasoningOutputTokens,
-        totalTokens: (inputTokens || 0) + (outputTokens || 0)
+        totalTokens: billableInputTokens + (outputTokens || 0) + (reasoningOutputTokens || 0)
     };
 }
 
@@ -695,6 +753,38 @@ function extractJsonErrors(stdout: string): string {
 
 function looksLikeLimit(text: string): boolean {
     return /usage limit|rate limit|quota|too many requests|429|try again at|weekly limit|5.?hour|credit limit|insufficient credits/i.test(text);
+}
+
+function missingExecutableError(error: unknown, bin: string): boolean {
+    const code = typeof error === 'object' && error ? (error as { code?: unknown }).code : null;
+
+    return code === 'ENOENT' || executableMissingFromText(String(error), bin);
+}
+
+function executableMissingFromText(text: string, bin: string): boolean {
+    const executable = bin.split(/[\\/]/).pop() || bin;
+    const escaped = executable.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    return new RegExp(`\\bENOENT\\b|not found.*${escaped}|${escaped}.*not found|executable not found`, 'i').test(text);
+}
+
+function formatMissingExecutableMessage(provider: ProviderType, bin: string): string {
+    const install = providerInstall(provider);
+    const installText = install
+        ? `\n\nInstall option: ${install.command}`
+        : '\n\nNo automatic installer is configured for this provider. Add a command override or install the CLI manually.';
+
+    return `Executable not found in $PATH: "${bin}"${installText}`;
+}
+
+function providerInstall(provider: ProviderType): { command: string; label: string } | null {
+    if (provider === 'codex') return { command: 'bun add -g @openai/codex', label: 'Install Codex CLI' };
+    if (provider === 'opencode') return { command: 'bun add -g opencode-ai', label: 'Install OpenCode CLI' };
+    if (provider === 'anthropic') return { command: 'bun add -g @anthropic-ai/claude-code', label: 'Install Claude Code' };
+    if (provider === 'zai') return { command: 'bun add -g @guizmo-ai/zai-cli', label: 'Install Z.ai CLI' };
+    if (provider === 'qwen') return { command: 'bun add -g @qwen-code/qwen-code', label: 'Install Qwen Code' };
+
+    return null;
 }
 
 function parseArgs(input: string): string[] {

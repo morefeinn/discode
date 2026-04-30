@@ -27,7 +27,7 @@ The Discode installer writes a local `.env`. Required values are:
 - `DISCORD_CLIENT_ID`
 - `ALLOWED_USER_IDS`
 
-`ALLOWED_USER_IDS` is comma-separated. `PRIMARY_ALLOWED_USER_ID` defaults to the first allowed user. You can later adjust allowed users and notification behavior from `/codex settings`.
+`ALLOWED_USER_IDS` is comma-separated. `PRIMARY_ALLOWED_USER_ID` defaults to the first allowed user. You can later adjust allowed users and notification behavior from the bot's settings command.
 
 ## Headless Install
 
@@ -61,12 +61,7 @@ discode restart
 discode stop
 discode status
 discode logs
-discode accounts
-discode accounts add
-discode switch next
 ```
-
-`codex-bot` still works as a compatibility alias, but new docs and update prompts use `discode`.
 
 ## Development
 
@@ -82,29 +77,31 @@ The app runs TypeScript directly with Bun. `bun run build` writes a bundled `dis
 
 ## Discord
 
-The slash command name follows the bot username unless `DISCODE_COMMAND_NAME` is set.
+The slash command name is derived from the bot username unless `DISCODE_COMMAND_NAME` is set. For example, a bot named `Discode` registers `/discode`; a bot named `Builder` registers `/builder`.
 
 Core commands:
 
 - `/init`
-- `/codex prompt`
-- `/codex new`
-- `/codex init`
-- `/codex review`
-- `/codex triage`
-- `/codex usage`
-- `/codex settings`
-- `/codex terminal`
-- `/codex project`
-- `/codex chats`
-- `/codex load`
-- `/codex archive`
+- `/<bot-name> prompt`
+- `/<bot-name> new`
+- `/<bot-name> init`
+- `/<bot-name> review`
+- `/<bot-name> triage`
+- `/<bot-name> image`
+- `/<bot-name> files`
+- `/<bot-name> usage`
+- `/<bot-name> settings`
+- `/<bot-name> terminal`
+- `/<bot-name> project`
+- `/<bot-name> chats`
+- `/<bot-name> load`
+- `/<bot-name> archive`
 
 Mentions and normal messages in Discode-created threads continue the current conversation. Message replies, channel mentions, files, and screenshots are included as context when the bot can read them.
 
-`/init` and `/codex init` initialize the active workspace by asking the agent to inspect the project and create or update `AGENTS.md`.
+`/init` and `/<bot-name> init` initialize the active workspace by asking the agent to inspect the project and create or update `AGENTS.md`.
 
-Prompts, reviews, triage, and init support tool tags. Put tags in the prompt text, for example `@browser-use` or `@computer-use`, or pass comma-separated tags through the `tools` option.
+Prompts, reviews, triage, and init support optional tool tags through the `tools` option or plain chat text when a configured provider supports them.
 
 When a conversation is already running, Discode offers `Steer now` to interrupt the active run or `Queue prompt` to run the new request next.
 
@@ -146,7 +143,9 @@ On first run, Discode can import existing Codex sessions from `~/.codex-switcher
 
 Supported providers are `codex`, `opencode`, `anthropic`, `zai`, `qwen`, and `custom`. Account `priority` controls account ordering, and `DISCODE_PROVIDER_PRIORITY` controls fallback provider order. Account `env` values and API keys are passed only to child agent processes.
 
-Use `discode accounts add` or the `/usage` dashboard's `Add account` button to add Codex/OpenAI, Anthropic, OpenCode, Z.ai, Qwen, or custom accounts. The flow mirrors OpenCode's provider setup style: use an existing logged-in provider CLI when available, or enter the provider API key locally. API keys are stored in `data/accounts.json` with mode `0600` and injected only into child agent processes.
+Use the usage dashboard's `Add account` button to add Codex/OpenAI, Anthropic, OpenCode, Z.ai, Qwen, or custom accounts. The flow mirrors OpenCode's provider setup style: use an existing logged-in provider CLI when available, or enter the provider API key locally. API keys are stored in `data/accounts.json` with mode `0600` and injected only into child agent processes.
+
+If a configured provider CLI is missing from `PATH`, Discode shows an install-and-retry button when it knows the provider package.
 
 Model pickers use the configured model list plus the public models.dev catalog when available, so provider models show whether they support thinking/reasoning and tool calls.
 
@@ -160,7 +159,7 @@ Rust backends are supported as custom provider binaries through `DISCODE_PROVIDE
 - `directory`: ask for approval before elevated access
 - `auto-review`: default to read-only review behavior
 
-Set the default with `DISCODE_PERMISSION_MODE`; change it later from `/codex settings`.
+Set the default with `DISCODE_PERMISSION_MODE`; change it later from the bot's settings command.
 
 ## Extensions
 

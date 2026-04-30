@@ -6,6 +6,7 @@ import path from 'node:path';
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
 export type ProviderType = 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'custom';
 export type PermissionMode = 'full' | 'directory' | 'auto-review';
+export type AgentNamingMode = 'greek' | 'custom';
 
 export interface BridgeSettings {
     model?: string | null;
@@ -22,6 +23,8 @@ export interface BridgeSettings {
     slashResponsesEphemeral?: boolean;
     finalResponsesAsImages?: boolean;
     autoSwitchOnLimit?: boolean;
+    agentNamingMode?: AgentNamingMode;
+    customAgentNames?: string[];
 }
 
 export interface ModelChoice {
@@ -36,6 +39,40 @@ interface SettingsFile {
 const dataPath = path.resolve('data', 'settings.json');
 export const DEFAULT_MODEL_CHOICE = '__default__';
 export const DEFAULT_PROVIDER_PRIORITY: ProviderType[] = ['codex', 'opencode', 'anthropic', 'zai', 'qwen', 'custom'];
+export const DEFAULT_AGENT_NAMES = [
+    'Apollo',
+    'Athena',
+    'Hermes',
+    'Artemis',
+    'Ares',
+    'Hera',
+    'Zeus',
+    'Poseidon',
+    'Demeter',
+    'Hephaestus',
+    'Dionysus',
+    'Hestia',
+    'Persephone',
+    'Hades',
+    'Nike',
+    'Iris',
+    'Helios',
+    'Selene',
+    'Eos',
+    'Atlas',
+    'Prometheus',
+    'Themis',
+    'Hypnos',
+    'Nemesis',
+    'Morpheus',
+    'Janus',
+    'Minerva',
+    'Vesta',
+    'Juno',
+    'Vulcan',
+    'Ceres',
+    'Fortuna'
+];
 
 async function readStore(): Promise<SettingsFile> {
     try {
@@ -150,6 +187,22 @@ export function getEffectiveFinalResponsesAsImages(settings: BridgeSettings): bo
 
 export function getEffectiveAutoSwitchOnLimit(settings: BridgeSettings, defaultValue: boolean): boolean {
     return settings.autoSwitchOnLimit ?? defaultValue;
+}
+
+export function getEffectiveAgentNames(settings: BridgeSettings): string[] {
+    const customNames = Array.isArray(settings.customAgentNames)
+        ? settings.customAgentNames.map(value => value.trim()).filter(Boolean)
+        : [];
+
+    if (settings.agentNamingMode === 'custom' && customNames.length > 0) {
+        return [...customNames, ...DEFAULT_AGENT_NAMES].slice(0, 32);
+    }
+
+    return DEFAULT_AGENT_NAMES;
+}
+
+export function isAgentNamingMode(value: unknown): value is AgentNamingMode {
+    return value === 'greek' || value === 'custom';
 }
 
 export function isReasoningEffort(value: unknown): value is ReasoningEffort {

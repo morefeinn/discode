@@ -30,13 +30,16 @@ async function writeStore(store: TokenStatsFile): Promise<void> {
 export async function recordTokenUsage(conversationKey: string, usage: CodexUsage): Promise<TokenStatsRecord> {
     const store = await readStore();
     const previous = store.conversations[conversationKey];
+    const visibleTotal = Math.max(0, (usage.inputTokens || 0) - (usage.cachedInputTokens || 0))
+        + (usage.outputTokens || 0)
+        + (usage.reasoningOutputTokens || 0);
     const next: TokenStatsRecord = {
         conversationKey,
         inputTokens: (previous?.inputTokens || 0) + (usage.inputTokens || 0),
         cachedInputTokens: (previous?.cachedInputTokens || 0) + (usage.cachedInputTokens || 0),
         outputTokens: (previous?.outputTokens || 0) + (usage.outputTokens || 0),
         reasoningOutputTokens: (previous?.reasoningOutputTokens || 0) + (usage.reasoningOutputTokens || 0),
-        totalTokens: (previous?.totalTokens || 0) + (usage.totalTokens || 0),
+        totalTokens: (previous?.totalTokens || 0) + visibleTotal,
         turns: (previous?.turns || 0) + 1,
         updatedAt: new Date().toISOString()
     };

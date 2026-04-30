@@ -1,4 +1,3 @@
-import sharp from 'sharp';
 import { BridgeConfig } from '../config.js';
 import {
     BridgeSettings,
@@ -14,6 +13,7 @@ import {
     getEffectiveReasoning,
     getEffectiveSlashResponsesEphemeral
 } from '../state/settings.js';
+import { renderSvgToPng } from './rendering.js';
 
 export type SettingsPage = 'runtime' | 'access' | 'notifications' | 'display' | 'failover';
 
@@ -21,7 +21,7 @@ const WIDTH = 1100;
 const HEIGHT = 620;
 
 export async function renderSettingsCard(settings: BridgeSettings, config: BridgeConfig, page: SettingsPage): Promise<Buffer> {
-    return sharp(Buffer.from(renderSvg(settings, config, page))).png().toBuffer();
+    return renderSvgToPng(renderSvg(settings, config, page));
 }
 
 function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: SettingsPage): string {
@@ -36,6 +36,8 @@ function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: Setting
     const slashResponsesEphemeral = getEffectiveSlashResponsesEphemeral(settings);
     const finalResponsesAsImages = getEffectiveFinalResponsesAsImages(settings);
     const autoSwitchOnLimit = getEffectiveAutoSwitchOnLimit(settings, config.autoSwitchOnLimit);
+    const agentNaming = settings.agentNamingMode === 'custom' ? 'Custom' : 'Greek';
+    const customAgentCount = settings.customAgentNames?.filter(Boolean).length || 0;
     const allowedUsers = mergeAllowedUsers(config.allowedUserIds, settings.allowedUserIds || []);
     const rows = page === 'runtime'
         ? [
@@ -64,8 +66,8 @@ function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: Setting
                 : page === 'display'
                     ? [
                     row('Final responses', finalResponsesAsImages ? 'Images' : 'Text', 166),
-                    row('Token stats', 'Available from response controls', 246),
-                    row('Terminal output', 'ANSI colors enabled', 326),
+                    row('Agent names', agentNaming === 'Custom' ? `${customAgentCount} custom` : 'Greek roster', 246),
+                    row('Token stats', 'Available from response controls', 326),
                     row('Button expiry', 'Disabled after 60 seconds', 406),
                     row('Slash responses', slashResponsesEphemeral ? 'Ephemeral' : 'Public', 486)
                     ]
@@ -109,7 +111,7 @@ function pageTitle(page: SettingsPage): string {
 function pageDescription(page: SettingsPage): string {
     if (page === 'runtime') return 'Provider, model, reasoning, and wrapper.';
     if (page === 'access') return 'Access, sandbox, and publishing.';
-    if (page === 'display') return 'Cards, response format, and interactive controls.';
+    if (page === 'display') return 'Cards, response format, agent names, and interactive controls.';
     if (page === 'failover') return 'Limit handling, account priority, and provider fallback.';
 
     return 'Privacy, pings, failover, and Discord scope.';

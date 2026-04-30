@@ -1,6 +1,12 @@
-import sharp from 'sharp';
-import { applyPalette, GIFEncoder, quantize } from 'gifenc';
 import { CodexUsage } from '../codex/runner.js';
+import { renderSvgToPng, renderSvgToRaw } from './rendering.js';
+
+export interface AgentStatus {
+    name: string;
+    role: string;
+    color: string;
+    active: boolean;
+}
 
 const WIDTH = 920;
 const HEIGHT = 320;
@@ -8,11 +14,13 @@ const CARD_X = 46;
 const CARD_Y = 16;
 const CARD_WIDTH = 828;
 const CARD_HEIGHT = 288;
-const THINKING_FRAMES = 60;
-const THINKING_FRAME_DELAY_MS = 32;
+const THINKING_FRAMES = 24;
+const THINKING_FRAME_DELAY_MS = 48;
 
-export async function renderThinkingGif(task: string, agentName: string): Promise<Buffer> {
-    const frames = await Promise.all(Array.from({ length: THINKING_FRAMES }, (_value, index) => renderRaw(renderThinkingSvg(task, cleanAgentName(agentName), index), WIDTH, HEIGHT)));
+export async function renderThinkingGif(task: string, agentName: string, agents: AgentStatus[] = []): Promise<Buffer> {
+    const { applyPalette, GIFEncoder, quantize } = await import('gifenc');
+    const roster = agents.length > 0 ? agents : [{ name: cleanAgentName(agentName), role: 'General', color: '#8b5cf6', active: true }];
+    const frames = await Promise.all(Array.from({ length: THINKING_FRAMES }, (_value, index) => renderRaw(renderThinkingSvg(task, cleanAgentName(agentName), roster, index), WIDTH, HEIGHT)));
     const gif = GIFEncoder();
 
     for (const frame of frames) {
@@ -33,25 +41,25 @@ export async function renderThinkingGif(task: string, agentName: string): Promis
 }
 
 export async function renderLimitCard(message: string, resetAt: string): Promise<Buffer> {
-    return sharp(Buffer.from([
+    return renderSvgToPng([
         `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">`,
         card(),
         text('Usage limit reached', 54, 82, 38, 620, '#f7f7f8', 800),
         text(resetAt ? `Resets ${resetAt}` : 'Switch accounts or try again later.', 54, 126, 23, 760, '#c5c5d2', 560),
         text(clean(message), 54, 180, 22, 800, '#8e8ea0', 520),
         '</svg>'
-    ].join(''))).png().toBuffer();
+    ].join(''));
 }
 
 export async function renderAccessRequestCard(scope: string): Promise<Buffer> {
-    return sharp(Buffer.from([
+    return renderSvgToPng([
         `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">`,
         card(),
         text('Access needed', 54, 86, 38, 620, '#f7f7f8', 800),
         text(clean(scope), 54, 136, 24, 780, '#c5c5d2', 560),
         text('Approve once to continue this run.', 54, 202, 22, 720, '#8e8ea0', 520),
         '</svg>'
-    ].join(''))).png().toBuffer();
+    ].join(''));
 }
 
 export async function renderUsageStatsCard(usage: CodexUsage): Promise<Buffer> {
@@ -69,7 +77,7 @@ export async function renderUsageStatsCard(usage: CodexUsage): Promise<Buffer> {
         text(format(item.value), 650, 129 + index * 38, 20, 170, '#c5c5d2', 560, 'end')
     ].join('')).join('');
 
-    return sharp(Buffer.from([
+    return renderSvgToPng([
         '<svg xmlns="http://www.w3.org/2000/svg" width="760" height="320" viewBox="0 0 760 320">',
         '<rect x="1" y="1" width="758" height="318" rx="28" fill="#202123" stroke="#343541" stroke-width="2"/>',
         text('Token Usage Stats', 54, 62, 32, 320, '#f7f7f8', 800),
@@ -78,10 +86,10 @@ export async function renderUsageStatsCard(usage: CodexUsage): Promise<Buffer> {
         '<circle cx="156" cy="162" r="48" fill="#202123"/>',
         rows || text('No token stats available.', 340, 152, 22, 320, '#8e8ea0', 560),
         '</svg>'
-    ].join(''))).png().toBuffer();
+    ].join(''));
 }
 
-function renderThinkingSvg(task: string, agentName: string, frame: number): string {
+function renderThinkingSvg(task: string, agentName: string, agents: AgentStatus[], frame: number): string {
     const dotFrame = Math.floor((frame / THINKING_FRAMES) * 3);
     const dots = [0, 1, 2].map(index => {
         const active = index === dotFrame;
@@ -93,6 +101,7 @@ function renderThinkingSvg(task: string, agentName: string, frame: number): stri
     const progress = frame / (THINKING_FRAMES - 1);
     const glareX = 84 + progress * 760;
     const taskText = clean(task);
+    const roster = agents.slice(0, 4).map((agent, index) => agentBadge(agent, 178 + index * 148, 224)).join('');
 
     return [
         `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">`,
@@ -113,13 +122,23 @@ function renderThinkingSvg(task: string, agentName: string, frame: number): stri
         text(`${agentName} is thinking`, WIDTH / 2, 116, 38, 560, '#f7f7f8', 800, 'middle'),
         text(taskText, WIDTH / 2, 164, 23, 700, '#c5c5d2', 560, 'middle'),
         `<polygon points="${glareX},132 ${glareX + 170},132 ${glareX + 126},184 ${glareX - 44},184" fill="url(#task-glare-gradient)" mask="url(#task-text-mask)"/>`,
-        dots,
+        roster || dots,
         '</svg>'
     ].join('');
 }
 
+function agentBadge(agent: AgentStatus, x: number, y: number): string {
+    const opacity = agent.active ? '1' : '0.42';
+
+    return [
+        `<circle cx="${x}" cy="${y}" r="8" fill="${agent.color}" opacity="${opacity}"/>`,
+        text(clean(agent.name), x + 18, y - 4, 17, 116, agent.active ? '#f7f7f8' : '#8e8ea0', 720),
+        text(clean(agent.role), x + 18, y + 18, 13, 112, '#8e8ea0', 540)
+    ].join('');
+}
+
 async function renderRaw(svg: string, width: number, height: number): Promise<Buffer> {
-    return sharp(Buffer.from(svg)).raw().ensureAlpha().resize(width, height).toBuffer();
+    return renderSvgToRaw(svg, width, height);
 }
 
 function card(): string {

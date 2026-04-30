@@ -62,6 +62,23 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
                 .setDescription(`File or screenshot for ${displayName} to review.`))
             .addStringOption(option => addToolOption(option)))
         .addSubcommand(subcommand => subcommand
+            .setName('image')
+            .setDescription('Generate or edit an image through the active provider.')
+            .addStringOption(option => option
+                .setName('prompt')
+                .setDescription('Image generation or editing request.')
+                .setRequired(true))
+            .addAttachmentOption(option => option
+                .setName('image')
+                .setDescription('Optional source image.'))
+            .addStringOption(option => option
+                .setName('workspace')
+                .setDescription(`Working directory or saved project for ${displayName}.`)
+                .setAutocomplete(true))
+            .addStringOption(option => option
+                .setName('model')
+                .setDescription('Model override.')))
+        .addSubcommand(subcommand => subcommand
             .setName('init')
             .setDescription('Initialize agent instructions for the active workspace.')
             .addStringOption(option => option
@@ -153,6 +170,13 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
         .addSubcommand(subcommand => subcommand
             .setName('workspace')
             .setDescription('Open the project directory dashboard.'))
+        .addSubcommand(subcommand => subcommand
+            .setName('files')
+            .setDescription('Open an image-based directory explorer.')
+            .addStringOption(option => option
+                .setName('workspace')
+                .setDescription(`Working directory or saved project for ${displayName}.`)
+                .setAutocomplete(true)))
         .addSubcommand(subcommand => subcommand
             .setName('mcp')
             .setDescription(`Open the ${displayName} MCP dashboard.`))
@@ -249,7 +273,7 @@ export async function registerSlashCommands(config: BridgeConfig, botName: strin
 function addToolOption(option: SlashCommandStringOption): SlashCommandStringOption {
     return option
         .setName('tools')
-        .setDescription('Tool tags, comma separated, like browser-use or computer-use.');
+        .setDescription('Optional provider tool tags, comma separated.');
 }
 
 export function resolveCommandName(config: BridgeConfig, botName: string): string {

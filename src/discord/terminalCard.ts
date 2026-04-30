@@ -1,4 +1,4 @@
-import sharp from 'sharp';
+import { renderSvgToPng } from './rendering.js';
 
 export interface TerminalCardData {
     workspace: string;
@@ -11,7 +11,7 @@ const WIDTH = 1100;
 const HEIGHT = 520;
 
 export async function renderTerminalCard(data: TerminalCardData): Promise<Buffer> {
-    return sharp(Buffer.from(renderSvg(data))).png().toBuffer();
+    return renderSvgToPng(renderSvg(data));
 }
 
 function renderSvg(data: TerminalCardData): string {

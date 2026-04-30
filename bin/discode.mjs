@@ -16,8 +16,8 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const rootDir = path.resolve(path.dirname(__filename), '..');
 const dataDir = path.join(rootDir, 'data');
-const pidPath = path.join(dataDir, 'codex-bot.pid');
-const logPath = path.join(dataDir, 'codex-bot.log');
+const pidPath = path.join(dataDir, 'discode.pid');
+const logPath = path.join(dataDir, 'discode.log');
 const runtimeEnv = getRuntimeEnv();
 const accountsPath = runtimeEnv.DISCODE_ACCOUNTS_PATH || path.join(dataDir, 'accounts.json');
 const legacySwitcherPath = runtimeEnv.CODEX_SWITCHER_IMPORT_PATH || runtimeEnv.CODEX_SWITCHER_PATH || path.join(os.homedir(), '.codex-switcher', 'accounts.json');
@@ -26,6 +26,46 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'
 
 const command = process.argv[2] || 'help';
 const args = process.argv.slice(3);
+const colorEnabled = process.stdout.isTTY && process.env.NO_COLOR !== '1' && process.env.NO_COLOR !== 'true';
+const colors = {
+    reset: '\x1b[0m',
+    bold: '\x1b[1m',
+    dim: '\x1b[2m',
+    cyan: '\x1b[36m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    red: '\x1b[31m',
+    gray: '\x1b[90m'
+};
+
+function color(value, code) {
+    return colorEnabled ? `${code}${value}${colors.reset}` : value;
+}
+
+function title(value) {
+    console.log(color(`\n${value}`, colors.bold));
+    console.log(color('-'.repeat(value.length), colors.dim));
+}
+
+function note(value) {
+    console.log(`${color('info', colors.cyan)} ${value}`);
+}
+
+function success(value) {
+    console.log(`${color('ok', colors.green)} ${value}`);
+}
+
+function warn(value) {
+    console.log(`${color('warn', colors.yellow)} ${value}`);
+}
+
+function fail(value) {
+    console.error(`${color('error', colors.red)} ${value}`);
+}
+
+function promptText(value) {
+    return color(`? ${value}`, colors.cyan);
+}
 
 function hasFlag(name) {
     return args.includes(`--${name}`);
@@ -109,6 +149,9 @@ function installCommand(name) {
     if (name === 'git') return 'brew install git';
     if (name === 'codex') return 'bun add -g @openai/codex';
     if (name === 'opencode') return 'bun add -g opencode-ai';
+    if (name === 'claude' || name === 'anthropic') return 'bun add -g @anthropic-ai/claude-code';
+    if (name === 'zai') return 'bun add -g @guizmo-ai/zai-cli';
+    if (name === 'qwen') return 'bun add -g @qwen-code/qwen-code';
 
     return '';
 }
@@ -119,20 +162,23 @@ async function checkDependencies(rl, headless) {
     const missingRequired = required.filter(name => !commandExists(name));
     const missingRecommended = recommended.filter(name => !commandExists(name));
 
-    if (missingRequired.length === 0 && missingRecommended.length === 0) return;
-    console.log('Dependency check');
+    if (missingRequired.length === 0 && missingRecommended.length === 0) {
+        success('Runtime dependencies are available.');
+        return;
+    }
+    title('Dependency check');
 
     for (const name of missingRequired) {
-        console.log(`Missing required dependency: ${name}`);
+        warn(`Missing required dependency: ${name}`);
     }
 
     for (const name of missingRecommended) {
-        console.log(`Missing optional dependency: ${name}`);
+        warn(`Missing optional dependency: ${name}`);
     }
 
     const shouldInstall = headless
         ? hasFlag('install-deps')
-        : ['y', 'yes'].includes((await rl.question('Install missing dependencies now? [y/N]: ')).trim().toLowerCase());
+        : ['y', 'yes'].includes((await rl.question(promptText('Install missing dependencies now? [y/N]: '))).trim().toLowerCase());
 
     if (!shouldInstall) {
         if (missingRequired.length > 0) throw new Error(`Install required dependencies first: ${missingRequired.join(', ')}`);
@@ -143,12 +189,13 @@ async function checkDependencies(rl, headless) {
         const command = installCommand(name);
 
         if (!command) continue;
-        console.log(`Installing ${name}`);
+        note(`Installing ${name}`);
         const result = spawnSync('sh', ['-lc', command], { stdio: 'inherit' });
 
         if (result.status !== 0 && missingRequired.includes(name)) {
             throw new Error(`Failed to install ${name}.`);
         }
+        if (result.status === 0) success(`Installed ${name}.`);
     }
 }
 
@@ -195,7 +242,7 @@ async function promptValue(rl, label, current, fallback, required) {
     const currentLabel = current ? ' [set]' : fallback ? ` [${fallback}]` : '';
 
     while (true) {
-        const answer = (await rl.question(`${label}${currentLabel}: `)).trim();
+        const answer = (await rl.question(promptText(`${label}${currentLabel}: `))).trim();
         const value = answer || current || fallback || '';
 
         if (!required || value) return value;
@@ -206,7 +253,7 @@ async function promptValue(rl, label, current, fallback, required) {
 async function promptBoolean(rl, label, current, fallback) {
     const normalized = String(current || fallback || '').toLowerCase();
     const defaultValue = ['1', 'true', 'yes', 'on', 'y'].includes(normalized);
-    const answer = (await rl.question(`${label} [${defaultValue ? 'Y/n' : 'y/N'}]: `)).trim().toLowerCase();
+    const answer = (await rl.question(promptText(`${label} [${defaultValue ? 'Y/n' : 'y/N'}]: `))).trim().toLowerCase();
 
     if (!answer) return defaultValue ? 'true' : 'false';
 
@@ -264,9 +311,10 @@ async function setup() {
     const rl = createPrompter();
 
     try {
-        console.log('Discode installer');
+        title('Discode setup');
+        note('Configure the Discord bot and local agent runtime.');
         await checkDependencies(rl, headless);
-        console.log('Required');
+        title('Required');
         const values = {
             DISCORD_TOKEN: await setupValue(rl, { label: 'Discord bot token', flag: 'token', current: existing.DISCORD_TOKEN, required: true, headless }),
             DISCORD_CLIENT_ID: await setupValue(rl, { label: 'Discord client id', flag: 'client-id', current: existing.DISCORD_CLIENT_ID, required: true, headless }),
@@ -281,11 +329,11 @@ async function setup() {
         });
         const mode = headless
             ? (hasFlag('technical') || hasFlag('runtime') ? 'technical' : 'simple')
-            : ((await rl.question('Setup mode simple/technical [simple]: ')).trim().toLowerCase() || 'simple');
+            : ((await rl.question(promptText('Setup mode simple/technical [simple]: '))).trim().toLowerCase() || 'simple');
         const technical = mode === 'technical';
         const configureRuntime = headless
             ? hasFlag('runtime')
-            : technical || ['y', 'yes'].includes((await rl.question('Configure runtime options now? [y/N]: ')).trim().toLowerCase());
+            : technical || ['y', 'yes'].includes((await rl.question(promptText('Configure runtime options now? [y/N]: '))).trim().toLowerCase());
 
         values.DISCODE_COMMAND_NAME = flagValue('command-name') || existing.DISCODE_COMMAND_NAME || '';
         values.DEFAULT_WORKSPACE = flagValue('workspace') || existing.DEFAULT_WORKSPACE || '';
@@ -311,7 +359,7 @@ async function setup() {
         values.DISCODE_EXTENSION_ROBLOX_PLACE_ID = flagValue('roblox-place-id') || existing.DISCODE_EXTENSION_ROBLOX_PLACE_ID || '';
 
         if (configureRuntime) {
-            console.log('Optional runtime');
+            title('Runtime');
             values.DISCODE_COMMAND_NAME = await setupValue(rl, { label: 'Slash command name override', flag: 'command-name', current: existing.DISCODE_COMMAND_NAME, headless });
             values.DEFAULT_WORKSPACE = await setupValue(rl, { label: 'Default workspace', flag: 'workspace', current: existing.DEFAULT_WORKSPACE, fallback: process.cwd(), headless });
             values.DEFAULT_MODEL = await setupValue(rl, { label: 'Default model', flag: 'model', current: existing.DEFAULT_MODEL, headless });
@@ -334,7 +382,7 @@ async function setup() {
         const configureRoblox = headless
             ? hasFlag('roblox')
             : technical
-                ? (await rl.question('Configure optional Roblox extension? [y/N]: ')).trim().toLowerCase()
+                ? (await rl.question(promptText('Configure optional Roblox extension? [y/N]: '))).trim().toLowerCase()
                 : 'n';
 
         if (['y', 'yes'].includes(configureRoblox)) {
@@ -345,8 +393,9 @@ async function setup() {
 
         writeEnvValues(values);
         ensureDataDir();
-        console.log('Wrote .env');
-        console.log('Run discode start to launch Discode.');
+        title('Ready');
+        success('Wrote .env');
+        note('Run `discode start` to launch Discode.');
     } finally {
         rl.close();
     }
@@ -354,6 +403,8 @@ async function setup() {
 
 function startForeground() {
     stopExistingInstances();
+    title('Starting Discode');
+    note('Press Ctrl+C to stop the foreground process.');
     const child = spawn(resolveRuntime(), [path.join(rootDir, 'src/index.ts')], {
         cwd: rootDir,
         env: getRuntimeEnv(),
@@ -378,8 +429,9 @@ function startBackground() {
 
     child.unref();
     fs.writeFileSync(pidPath, `${child.pid}\n`);
-    console.log(`Discode started in the background (pid ${child.pid}).`);
-    console.log(`logs: ${logPath}`);
+    success(`Discode started in the background.`);
+    note(`pid ${child.pid}`);
+    note(`logs ${logPath}`);
 }
 
 function stop() {
@@ -394,7 +446,7 @@ function stopExistingInstances() {
     if (isProcessRunning(pid)) {
         process.kill(pid, 'SIGTERM');
         stopped.add(pid);
-        console.log(`stopped existing Discode pid ${pid}.`);
+        success(`Stopped existing Discode pid ${pid}.`);
     }
     fs.rmSync(pidPath, { force: true });
     const pattern = `${rootDir}/src/index.ts`;
@@ -409,7 +461,7 @@ function stopExistingInstances() {
 
         try {
             process.kill(foundPid, 'SIGTERM');
-            console.log(`stopped existing Discode pid ${foundPid}.`);
+            success(`Stopped existing Discode pid ${foundPid}.`);
         } catch {
         }
     }
@@ -419,16 +471,17 @@ function status() {
     const pid = readPid();
 
     if (isProcessRunning(pid)) {
-        console.log(`Discode is running (pid ${pid}).`);
-        console.log(`logs: ${logPath}`);
+        success(`Discode is running.`);
+        note(`pid ${pid}`);
+        note(`logs ${logPath}`);
         return;
     }
-    console.log('Discode is stopped.');
+    warn('Discode is stopped.');
 }
 
 function logs() {
     if (!fs.existsSync(logPath)) {
-        console.log('No log file exists yet.');
+        warn('No log file exists yet.');
         return;
     }
     const text = fs.readFileSync(logPath, 'utf8');
@@ -505,158 +558,6 @@ function normalizeProvider(provider) {
         : 'codex';
 }
 
-function accountName(account, index) {
-    if (!account.name || account.name.includes('@')) return `Account ${index + 1}`;
-
-    return account.name;
-}
-
-function accounts() {
-    const state = readAccountState();
-
-    if (state.accounts.length === 0) {
-        console.log('No Discode accounts found.');
-        console.log(`Create ${accountsPath} or set DISCODE_ACCOUNTS_PATH.`);
-        return;
-    }
-
-    for (const [index, account] of state.accounts.entries()) {
-        const marker = account.id === state.active_account_id ? '*' : '-';
-        console.log(`${marker} ${index + 1}. ${accountName(account, index)} ${normalizeProvider(account.provider)} ${account.plan_type || account.auth_mode || 'unknown'}`);
-    }
-}
-
-async function addAccount() {
-    const state = readAccountState();
-    const headless = hasFlag('headless') || hasFlag('yes') || hasFlag('ci');
-    const providerFlag = flagValue('provider');
-    const rl = createPrompter();
-
-    try {
-        const selectedProvider = providerFlag
-            ? normalizeProvider(providerFlag)
-            : normalizeProvider(headless ? 'codex' : await promptValue(rl, 'Provider codex/opencode/anthropic/zai/qwen/custom', '', 'codex', true));
-        const name = await setupValue(rl, { label: 'Account name', flag: 'name', current: '', fallback: `${providerLabel(selectedProvider)} ${state.accounts.length + 1}`, headless });
-        const email = await setupValue(rl, { label: 'Email or label', flag: 'email', current: '', headless });
-        const priority = Number(await setupValue(rl, { label: 'Priority', flag: 'priority', current: '', fallback: String(state.accounts.length + 1), headless }));
-        const command = await setupValue(rl, { label: 'Command override', flag: 'command', current: '', headless });
-        const apiKey = await setupValue(rl, {
-            label: `${defaultApiKeyName(selectedProvider)} or leave empty if the provider CLI is already logged in`,
-            flag: 'api-key',
-            current: '',
-            headless
-        });
-        const account = {
-            id: uniqueAccountId(state, name || selectedProvider),
-            name,
-            provider: selectedProvider,
-            email: email || undefined,
-            plan_type: apiKey ? 'api_key' : 'login',
-            auth_mode: apiKey ? 'api_key' : 'login',
-            auth_data: apiKey ? {
-                api_key: apiKey,
-                env_key: defaultApiKeyName(selectedProvider)
-            } : {
-                type: 'login'
-            },
-            command: command || undefined,
-            priority: Number.isFinite(priority) ? priority : state.accounts.length + 1,
-            last_used_at: new Date().toISOString()
-        };
-
-        state.accounts.push(account);
-        state.active_account_id = account.id;
-        writeAccountState(state);
-        console.log(`Added and activated ${account.name}.`);
-    } finally {
-        rl.close();
-    }
-}
-
-function uniqueAccountId(state, value) {
-    const base = String(value || 'account')
-        .toLowerCase()
-        .replace(/[^a-z0-9_-]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 48) || 'account';
-    let id = base;
-    let suffix = 2;
-
-    while (state.accounts.some(account => account.id === id)) {
-        id = `${base}-${suffix}`;
-        suffix += 1;
-    }
-
-    return id;
-}
-
-function providerLabel(provider) {
-    if (provider === 'anthropic') return 'Anthropic';
-    if (provider === 'zai') return 'Z.ai';
-    if (provider === 'qwen') return 'Qwen';
-    if (provider === 'opencode') return 'OpenCode';
-
-    return 'Codex';
-}
-
-function defaultApiKeyName(provider) {
-    if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
-    if (provider === 'zai') return 'ZAI_API_KEY';
-    if (provider === 'qwen') return 'QWEN_API_KEY';
-
-    return 'OPENAI_API_KEY';
-}
-
-function findAccount(state, query) {
-    const normalized = query.trim().toLowerCase();
-    const index = Number(normalized);
-
-    if (Number.isInteger(index) && index >= 1 && index <= state.accounts.length) {
-        return state.accounts[index - 1];
-    }
-
-    if (normalized === 'next') {
-        const activeIndex = state.accounts.findIndex(account => account.id === state.active_account_id);
-        return state.accounts[activeIndex < 0 ? 0 : (activeIndex + 1) % state.accounts.length];
-    }
-
-    return state.accounts.find(account =>
-        account.id.toLowerCase().startsWith(normalized)
-        || account.name.toLowerCase() === normalized
-        || account.name.toLowerCase().includes(normalized)
-        || account.email?.toLowerCase() === normalized
-    );
-}
-
-function switchAccount(query) {
-    if (!query) {
-        console.error('Usage: discode switch <index|name|id|next>');
-        process.exit(1);
-    }
-    const state = readAccountState();
-    const account = findAccount(state, query);
-
-    if (!account) {
-        console.error(`No account matched "${query}".`);
-        process.exit(1);
-    }
-
-    account.last_used_at = new Date().toISOString();
-    state.active_account_id = account.id;
-    writeAccountState(state);
-
-    if (normalizeProvider(account.provider) === 'codex' && account.auth_data?.access_token && account.auth_data?.account_id) {
-        const tokens = { ...account.auth_data };
-        delete tokens.type;
-        fs.mkdirSync(path.dirname(codexAuthPath), { recursive: true });
-        fs.writeFileSync(codexAuthPath, `${JSON.stringify({
-            tokens,
-            last_refresh: new Date().toISOString()
-        }, null, 2)}\n`, { mode: 0o600 });
-    }
-    console.log(`Switched Discode to ${accountName(account, 0)}.`);
-}
-
 async function printUpdateNoticeIfNeeded() {
     if (['setup', 'update', 'version', 'help'].includes(command)) return;
     const status = await checkForUpdate(rootDir);
@@ -721,7 +622,12 @@ function runChecked(bin, args) {
 }
 
 function help() {
-    console.log(`discode ${packageJson.version}
+    console.log(`${color(`discode ${packageJson.version}`, colors.bold)}
+
+${color('Usage', colors.cyan)}
+  discode <command>
+
+${color('Commands', colors.cyan)}
   discode setup              Run the Discode installer
   discode setup --headless   Write .env from flags or environment
   discode version            Show version
@@ -733,11 +639,7 @@ function help() {
   discode restart            Restart in the background
   discode status             Show background status
   discode logs               Show recent background logs
-  discode accounts           List Discode accounts
-  discode accounts add       Add a Codex, Anthropic, OpenCode, Z.ai, Qwen, or custom account
-  discode switch <account>   Switch account by index, id, name, or next
-
-  codex-bot still works as a compatibility alias.`);
+`);
 }
 
 try {
@@ -768,19 +670,12 @@ try {
         logs();
     } else if (command === 'version') {
         console.log(packageJson.version);
-    } else if (command === 'accounts') {
-        if (args[0] === 'add') {
-            args.shift();
-            await addAccount();
-        } else {
-            accounts();
-        }
-    } else if (command === 'switch') {
-        switchAccount(args.join(' '));
-    } else {
+    } else if (command === 'help' || command === '--help' || command === '-h') {
         help();
+    } else {
+        throw new Error(`Unknown command: ${command}`);
     }
 } catch (error) {
-    console.error(error?.message || String(error));
+    fail(error?.message || String(error));
     process.exit(1);
 }

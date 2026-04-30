@@ -1,4 +1,4 @@
-import sharp from 'sharp';
+import { renderSvgToPng } from './rendering.js';
 
 export interface TerminalOutputCardData {
     command: string;
@@ -14,7 +14,7 @@ const MAX_LINES = 22;
 const MAX_COLUMNS = 78;
 
 export async function renderTerminalOutputCard(data: TerminalOutputCardData): Promise<Buffer> {
-    return sharp(Buffer.from(renderSvg(data))).png().toBuffer();
+    return renderSvgToPng(renderSvg(data));
 }
 
 function renderSvg(data: TerminalOutputCardData): string {

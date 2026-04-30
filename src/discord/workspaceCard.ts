@@ -1,4 +1,4 @@
-import sharp from 'sharp';
+import { renderSvgToPng } from './rendering.js';
 
 export interface WorkspaceCardProject {
     index: number;
@@ -28,7 +28,7 @@ const WIDTH = 1100;
 const HEIGHT = 660;
 
 export async function renderWorkspaceCard(data: WorkspaceCardData): Promise<Buffer> {
-    return sharp(Buffer.from(renderSvg(data))).png().toBuffer();
+    return renderSvgToPng(renderSvg(data));
 }
 
 function renderSvg(data: WorkspaceCardData): string {

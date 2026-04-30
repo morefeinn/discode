@@ -15,11 +15,10 @@
   },
   "homepage": "https://github.com/morefeinn/discode#readme",
   "bin": {
-    "codex-bot": "./bin/codex-bot.mjs",
-    "discode": "./bin/codex-bot.mjs"
+    "discode": "./bin/discode.mjs"
   },
   "scripts": {
-    "setup": "bun bin/codex-bot.mjs setup",
+    "setup": "bun bin/discode.mjs setup",
     "start": "bun src/index.ts",
     "dev": "bun src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target bun --packages external",

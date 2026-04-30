@@ -19,8 +19,8 @@ import {
     ThreadAutoArchiveDuration
 } from 'discord.js';
 import { execFile } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { mkdir, readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -57,7 +57,9 @@ import {
     getEffectiveProviderPriority,
     getEffectiveReasoning,
     getEffectiveSlashResponsesEphemeral,
+    getEffectiveAgentNames,
     isPermissionMode,
+    isAgentNamingMode,
     isProviderType,
     isReasoningEffort,
     DEFAULT_MODEL_CHOICE,
@@ -65,7 +67,8 @@ import {
     updateBridgeSettings,
     PermissionMode,
     ProviderType,
-    ReasoningEffort
+    ReasoningEffort,
+    AgentNamingMode
 } from '../state/settings.js';
 import { listAvailableModels, ModelChoiceMetadata } from '../models/catalog.js';
 import { listRunningRuns, saveRun, updateRun, RunRecord } from '../state/runs.js';
@@ -80,10 +83,11 @@ import {
 } from '../update/checker.js';
 import { renderChatCard } from './chatCard.js';
 import { collectDiscordContext, collectTargetChannelContext, withDiscordContext } from './context.js';
+import { FileExplorerEntry, renderFileExplorerCard } from './fileExplorerCard.js';
 import { renderFinalResponseCards } from './finalResponseCard.js';
 import { createInitPrompt } from './initPrompt.js';
 import { renderMcpCard } from './mcpCard.js';
-import { renderAccessRequestCard, renderLimitCard, renderThinkingGif, renderUsageStatsCard } from './statusCard.js';
+import { AgentStatus, renderAccessRequestCard, renderLimitCard, renderThinkingGif, renderUsageStatsCard } from './statusCard.js';
 import { renderSettingsCard, SettingsPage } from './settingsCard.js';
 import { renderTerminalCard } from './terminalCard.js';
 import { runTerminalCommand } from './terminal.js';
@@ -115,6 +119,13 @@ type PromptOptions = {
 type LimitRetry =
     | { kind: 'prompt'; conversationKey: string; prompt: string; options: PromptOptions; requesterId?: string }
     | { kind: 'review'; options: CodexReviewOptions; requesterId?: string };
+type PendingProviderInstall = {
+    retry: LimitRetry;
+    command: string;
+    executable: string;
+    label: string;
+    expiresAt: number;
+};
 type PendingSteer = { conversationKey: string; prompt: string; options: PromptOptions };
 type QueuedSteer = PendingSteer & { noticeChannelId: string };
 type PendingAccess = { target: ResponseTarget; conversationKey: string; prompt: string; options: PromptOptions };
@@ -131,83 +142,65 @@ const pendingSteers = new Map<string, PendingSteer>();
 const queuedSteers = new Map<string, QueuedSteer[]>();
 const pendingAccessRequests = new Map<string, PendingAccess>();
 const pendingLimitRetries = new Map<string, PendingLimit>();
+const pendingProviderInstalls = new Map<string, PendingProviderInstall>();
 const componentMessageActivity = new Map<string, number>();
 const componentMessages = new Map<string, Message>();
 const latestComponentMessageByChannel = new Map<string, string>();
 const ATTACHMENT_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.txt', '.log', '.json', '.md']);
 const MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
-const MODEL_BUTTON_ID = 'codex:model-panel';
-const REASONING_BUTTON_ID = 'codex:reasoning-panel';
-const MODEL_SELECT_ID = 'codex:set-model';
-const REASONING_SELECT_ID = 'codex:set-reasoning';
-const PROVIDER_SELECT_ID = 'codex:set-provider';
-const PROVIDER_PRIORITY_SELECT_ID = 'codex:set-provider-priority';
-const PERMISSION_SELECT_ID = 'codex:set-permission';
-const NOTIFY_DONE_SELECT_ID = 'codex:set-notify-done';
-const NOTIFY_PERMISSION_SELECT_ID = 'codex:set-notify-permission';
-const NOTIFY_LIMIT_SELECT_ID = 'codex:set-notify-limit';
-const SLASH_PRIVACY_SELECT_ID = 'codex:set-slash-privacy';
-const ACCESS_USERS_BUTTON_ID = 'codex:settings-access-users';
-const ACCESS_USERS_MODAL_ID = 'codex:settings-access-users-modal';
-const SETTINGS_PAGE_SELECT_ID = 'codex:settings-page';
-const SETTINGS_BUTTON_ID = 'codex:settings-panel';
-const TOKEN_STATS_BUTTON_ID = 'codex:token-stats';
-const FINAL_RESPONSE_SELECT_ID = 'codex:set-final-response';
-const FAILOVER_SELECT_ID = 'codex:set-failover';
-const ADD_ACCOUNT_BUTTON_ID = 'codex:add-account';
-const ADD_ACCOUNT_PROVIDER_SELECT_ID = 'codex:add-account-provider';
-const ADD_ACCOUNT_MODAL_ID = 'codex:add-account-modal';
-const MODEL_PICKER_PREV_ID = 'codex:model-prev';
-const MODEL_PICKER_NEXT_ID = 'codex:model-next';
-const ACCESS_APPROVE_ID = 'codex:approve-access';
-const CONVERSATION_SELECT_ID = 'codex:load-conversation';
-const CHAT_LINK_SELECT_ID = 'codex:chat-link';
-const ACCOUNT_SELECT_ID = 'codex:switch-account';
-const LIMIT_ACCOUNT_SELECT_ID = 'codex:limit-switch-account';
-const LIMIT_PROVIDER_SELECT_ID = 'codex:limit-switch-provider';
-const QUEUE_PROMPT_BUTTON_ID = 'codex:queue-prompt';
-const STEER_BUTTON_ID = 'codex:steer';
-const USAGE_PREV_ID = 'codex:usage-prev';
-const USAGE_NEXT_ID = 'codex:usage-next';
-const USAGE_ACTIVATE_ACCOUNT_ID = 'codex:usage-activate-account';
-const WORKSPACE_SELECT_ID = 'codex:set-workspace';
-const WORKSPACE_ADD_BUTTON_ID = 'codex:add-workspace';
-const WORKSPACE_ADD_MODAL_ID = 'codex:add-workspace-modal';
-const TERMINAL_RUN_BUTTON_ID = 'codex:terminal-run';
-const TERMINAL_RUN_MODAL_ID = 'codex:terminal-run-modal';
-const MCP_ADD_BUTTON_ID = 'codex:add-mcp';
-const MCP_ADD_MODAL_ID = 'codex:add-mcp-modal';
+const MODEL_BUTTON_ID = 'discode:model-panel';
+const REASONING_BUTTON_ID = 'discode:reasoning-panel';
+const MODEL_SELECT_ID = 'discode:set-model';
+const REASONING_SELECT_ID = 'discode:set-reasoning';
+const PROVIDER_SELECT_ID = 'discode:set-provider';
+const PROVIDER_PRIORITY_SELECT_ID = 'discode:set-provider-priority';
+const PERMISSION_SELECT_ID = 'discode:set-permission';
+const NOTIFY_DONE_SELECT_ID = 'discode:set-notify-done';
+const NOTIFY_PERMISSION_SELECT_ID = 'discode:set-notify-permission';
+const NOTIFY_LIMIT_SELECT_ID = 'discode:set-notify-limit';
+const SLASH_PRIVACY_SELECT_ID = 'discode:set-slash-privacy';
+const ACCESS_USERS_BUTTON_ID = 'discode:settings-access-users';
+const ACCESS_USERS_MODAL_ID = 'discode:settings-access-users-modal';
+const SETTINGS_PAGE_SELECT_ID = 'discode:settings-page';
+const SETTINGS_BUTTON_ID = 'discode:settings-panel';
+const TOKEN_STATS_BUTTON_ID = 'discode:token-stats';
+const FINAL_RESPONSE_SELECT_ID = 'discode:set-final-response';
+const FAILOVER_SELECT_ID = 'discode:set-failover';
+const AGENT_NAMING_SELECT_ID = 'discode:set-agent-naming';
+const AGENT_NAMES_BUTTON_ID = 'discode:agent-names';
+const AGENT_NAMES_MODAL_ID = 'discode:agent-names-modal';
+const ADD_ACCOUNT_BUTTON_ID = 'discode:add-account';
+const ADD_ACCOUNT_PROVIDER_SELECT_ID = 'discode:add-account-provider';
+const ADD_ACCOUNT_MODAL_ID = 'discode:add-account-modal';
+const MODEL_PICKER_PREV_ID = 'discode:model-prev';
+const MODEL_PICKER_NEXT_ID = 'discode:model-next';
+const ACCESS_APPROVE_ID = 'discode:approve-access';
+const CONVERSATION_SELECT_ID = 'discode:load-conversation';
+const CHAT_LINK_SELECT_ID = 'discode:chat-link';
+const ACCOUNT_SELECT_ID = 'discode:switch-account';
+const LIMIT_ACCOUNT_SELECT_ID = 'discode:limit-switch-account';
+const LIMIT_PROVIDER_SELECT_ID = 'discode:limit-switch-provider';
+const INSTALL_PROVIDER_BUTTON_ID = 'discode:install-provider';
+const QUEUE_PROMPT_BUTTON_ID = 'discode:queue-prompt';
+const STEER_BUTTON_ID = 'discode:steer';
+const USAGE_PREV_ID = 'discode:usage-prev';
+const USAGE_NEXT_ID = 'discode:usage-next';
+const USAGE_ACTIVATE_ACCOUNT_ID = 'discode:usage-activate-account';
+const WORKSPACE_SELECT_ID = 'discode:set-workspace';
+const WORKSPACE_ADD_BUTTON_ID = 'discode:add-workspace';
+const WORKSPACE_ADD_MODAL_ID = 'discode:add-workspace-modal';
+const FILE_EXPLORER_BUTTON_ID = 'discode:file-explorer';
+const TERMINAL_RUN_BUTTON_ID = 'discode:terminal-run';
+const TERMINAL_RUN_MODAL_ID = 'discode:terminal-run-modal';
+const MCP_ADD_BUTTON_ID = 'discode:add-mcp';
+const MCP_ADD_MODAL_ID = 'discode:add-mcp-modal';
 const COMPONENT_IDLE_TTL_MS = 60 * 1000;
 const USAGE_DASHBOARD_TTL_MS = COMPONENT_IDLE_TTL_MS;
-const GREEK_ACCOUNT_NAMES = [
-    'Apollo',
-    'Athena',
-    'Hermes',
-    'Artemis',
-    'Ares',
-    'Hera',
-    'Zeus',
-    'Poseidon',
-    'Demeter',
-    'Hephaestus',
-    'Dionysus',
-    'Hestia',
-    'Persephone',
-    'Hades',
-    'Nike',
-    'Iris',
-    'Helios',
-    'Selene',
-    'Eos',
-    'Atlas',
-    'Prometheus',
-    'Themis',
-    'Hypnos',
-    'Nemesis',
-    'Morpheus'
-];
+const ACCOUNT_ADJECTIVES = ['North', 'Bright', 'Clear', 'Prime', 'Stone', 'Swift', 'True', 'Silver', 'Golden', 'Blue', 'Red', 'Green', 'Quiet', 'Open', 'Steady', 'Fresh'];
+const ACCOUNT_NOUNS = ['Harbor', 'Keystone', 'Beacon', 'Ledger', 'Vault', 'Signal', 'Bridge', 'Forge', 'Anchor', 'Summit', 'Field', 'Orbit', 'Relay', 'Crown', 'Path', 'Gate'];
+const AGENT_COLORS = ['#8b5cf6', '#10a37f', '#3b82f6', '#f59e0b', '#ec4899', '#14b8a6'];
 const reasoningChoices: { label: string; value: ReasoningEffort; description: string }[] = [
-    { label: 'None', value: 'none', description: 'Use the Codex config default.' },
+    { label: 'None', value: 'none', description: 'Use the provider config default.' },
     { label: 'Low', value: 'low', description: 'Faster answers for lighter work.' },
     { label: 'Medium', value: 'medium', description: 'Balanced reasoning for normal work.' },
     { label: 'High', value: 'high', description: 'Deeper reasoning for harder tasks.' },
@@ -311,6 +304,11 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (subcommand === 'files') {
+            await this.showFileExplorer(interaction, interaction.options.getString('workspace') || undefined);
+            return;
+        }
+
         if (subcommand === 'init') {
             await this.handleInitInteraction(interaction);
             return;
@@ -402,6 +400,31 @@ export class DiscordCodexBridge {
                 reasoningEffort,
                 dangerous: interaction.options.getBoolean('dangerous') === true || this.isPublishRequest(prompt),
                 chatName,
+                requesterId: interaction.user.id
+            });
+            return;
+        }
+
+        if (subcommand === 'image') {
+            await interaction.deferReply(await this.getSlashReplyOptions());
+            const prompt = interaction.options.getString('prompt', true);
+            const image = interaction.options.getAttachment('image');
+            const project = await this.resolveProject(interaction.options.getString('workspace') || undefined, interaction.options.getString('model') || undefined);
+            const settings = await getBridgeSettings();
+            const selectedModel = interaction.options.getString('model') || project.model || settings.model || undefined;
+            const request = [
+                prompt,
+                image?.url ? `Source image: ${image.url}` : ''
+            ].filter(Boolean).join('\n');
+
+            await this.runPrompt(interaction, interaction.channelId, this.withPromptGuidance(request), {
+                fresh: false,
+                workspace: project.workspace,
+                model: selectedModel,
+                provider: getEffectiveProvider(settings, this.config.defaultProvider),
+                permissionMode: getEffectivePermissionMode(settings, this.config.defaultPermissionMode),
+                reasoningEffort: getEffectiveReasoning(settings),
+                chatName: this.getChatName(`Image ${prompt}`),
                 requesterId: interaction.user.id
             });
             return;
@@ -585,6 +608,11 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.isButton() && interaction.customId === AGENT_NAMES_BUTTON_ID) {
+            await interaction.showModal(await this.createAgentNamesModal());
+            return;
+        }
+
         if (interaction.isButton() && interaction.customId === ADD_ACCOUNT_BUTTON_ID) {
             await this.showAddAccountProviderPicker(interaction);
             return;
@@ -607,6 +635,11 @@ export class DiscordCodexBridge {
 
         if (interaction.isButton() && interaction.customId === WORKSPACE_ADD_BUTTON_ID) {
             await interaction.showModal(this.createWorkspaceModal());
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId === FILE_EXPLORER_BUTTON_ID) {
+            await this.showFileExplorer(interaction);
             return;
         }
 
@@ -635,6 +668,13 @@ export class DiscordCodexBridge {
                 permissionMode: 'full',
                 dangerous: true
             });
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId.startsWith(INSTALL_PROVIDER_BUTTON_ID)) {
+            const id = interaction.customId.split(':').at(-1) || '';
+
+            await this.installProviderAndRetry(interaction, id);
             return;
         }
 
@@ -722,6 +762,16 @@ export class DiscordCodexBridge {
 
         if (interaction.isStringSelectMenu() && interaction.customId === FINAL_RESPONSE_SELECT_ID) {
             await updateBridgeSettings({ finalResponsesAsImages: interaction.values[0] === 'images' });
+            await this.updateSettingsDashboard(interaction, 'display');
+            return;
+        }
+
+        if (interaction.isStringSelectMenu() && interaction.customId === AGENT_NAMING_SELECT_ID) {
+            const selected = interaction.values[0];
+
+            if (isAgentNamingMode(selected)) {
+                await updateBridgeSettings({ agentNamingMode: selected });
+            }
             await this.updateSettingsDashboard(interaction, 'display');
             return;
         }
@@ -948,6 +998,21 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.customId === AGENT_NAMES_MODAL_ID) {
+            const customAgentNames = interaction.fields.getTextInputValue('agentNames')
+                .split(',')
+                .map(value => value.trim())
+                .filter(Boolean)
+                .slice(0, 32);
+
+            await updateBridgeSettings({
+                agentNamingMode: customAgentNames.length > 0 ? 'custom' : 'greek',
+                customAgentNames
+            });
+            await this.showSettingsDashboard(interaction, 'display');
+            return;
+        }
+
         if (interaction.customId.startsWith(`${ADD_ACCOUNT_MODAL_ID}:`)) {
             const provider = interaction.customId.split(':').at(-1) || '';
 
@@ -1035,6 +1100,11 @@ export class DiscordCodexBridge {
 
         if (!request) {
             await message.reply('Send a prompt after the mention.');
+            return true;
+        }
+
+        if (this.isDirectoryExplorerRequest(request)) {
+            await this.sendFileExplorerMessage(message, request);
             return true;
         }
 
@@ -1226,6 +1296,19 @@ export class DiscordCodexBridge {
                 });
                 return;
             }
+            if (!result.ok && result.missingExecutable) {
+                await this.sendMissingProviderResponse(target, result, {
+                    kind: 'prompt',
+                    conversationKey,
+                    prompt,
+                    options: {
+                        ...options,
+                        fresh: false
+                    },
+                    requesterId: options.requesterId
+                });
+                return;
+            }
             const latestMessage = await this.sendPages(
                 target,
                 this.withFooter(resultText, result),
@@ -1250,7 +1333,7 @@ export class DiscordCodexBridge {
     }
 
     private async sendThinkingMessage(channel: any, task: string): Promise<Message> {
-        const file = new AttachmentBuilder(await renderThinkingGif(task, this.botName), { name: `${this.commandName}-thinking.gif` });
+        const file = new AttachmentBuilder(await renderThinkingGif(task, this.botName, await this.createAgentRoster(task)), { name: `${this.commandName}-thinking.gif` });
 
         return channel.send({
             content: '',
@@ -1297,6 +1380,14 @@ export class DiscordCodexBridge {
                 : result.ok ? result.text : `${this.botName} review failed.\n\n${result.error || result.text}`;
             if (!result.ok && this.isUsageLimitText(result.error || result.text)) {
                 await this.sendLimitResponse(target, result.error || result.text, {
+                    kind: 'review',
+                    options,
+                    requesterId: options.requesterId
+                });
+                return;
+            }
+            if (!result.ok && result.missingExecutable) {
+                await this.sendMissingProviderResponse(target, result, {
                     kind: 'review',
                     options,
                     requesterId: options.requesterId
@@ -1474,7 +1565,7 @@ export class DiscordCodexBridge {
             embeds: [],
             attachments: [],
             components,
-            files: [new AttachmentBuilder(image, { name: 'codex-limit.png' })]
+            files: [new AttachmentBuilder(image, { name: `${this.commandName}-limit.png` })]
         };
 
         if (target instanceof Message) {
@@ -1489,6 +1580,115 @@ export class DiscordCodexBridge {
         this.scheduleComponentExpiry(messageResult as Message, components.length > 0);
 
         return messageResult as Message;
+    }
+
+    private async sendMissingProviderResponse(target: ResponseTarget, result: CodexRunResult, retry: LimitRetry): Promise<Message | null> {
+        const executable = result.missingExecutable || 'provider CLI';
+        const provider = result.provider ? this.capitalize(result.provider) : 'Provider';
+        const lines = [
+            `${provider} is not installed or is not on this bot process PATH.`,
+            '',
+            `Missing executable: \`${executable}\``,
+            result.installCommand ? `Installer: \`${result.installCommand}\`` : 'No automatic installer is configured for this provider. Add a command override in the account or settings.',
+            '',
+            this.trimError(result.error || result.text)
+        ].filter(Boolean);
+        const components: ActionRowBuilder<ButtonBuilder>[] = [];
+
+        if (result.installCommand) {
+            const id = this.createUsageSessionId();
+
+            pendingProviderInstalls.set(id, {
+                retry,
+                command: result.installCommand,
+                executable,
+                label: result.installLabel || `Install ${provider}`,
+                expiresAt: Date.now() + 5 * COMPONENT_IDLE_TTL_MS
+            });
+            components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`${INSTALL_PROVIDER_BUTTON_ID}:${id}`)
+                    .setLabel('Install and retry')
+                    .setStyle(ButtonStyle.Primary),
+                new ButtonBuilder()
+                    .setCustomId(SETTINGS_BUTTON_ID)
+                    .setLabel('Settings')
+                    .setStyle(ButtonStyle.Secondary)
+            ));
+        }
+
+        const payload = {
+            content: sanitizeDiscordText(lines.join('\n')).slice(0, 1900),
+            embeds: [],
+            attachments: [],
+            components
+        };
+
+        if (target instanceof Message) {
+            const message = await target.edit(payload).catch(async () => {
+                return (target.channel as any).send(payload);
+            });
+            this.scheduleComponentExpiry(message as Message, components.length > 0);
+            return message as Message;
+        }
+
+        const messageResult = await target.editReply(payload);
+        this.scheduleComponentExpiry(messageResult as Message, components.length > 0);
+
+        return messageResult as Message;
+    }
+
+    private async installProviderAndRetry(interaction: ButtonInteraction, installId: string): Promise<void> {
+        const pending = pendingProviderInstalls.get(installId);
+
+        if (!pending || pending.expiresAt < Date.now()) {
+            pendingProviderInstalls.delete(installId);
+            await interaction.reply({
+                content: 'That provider install action expired.',
+                flags: MessageFlags.Ephemeral
+            }).catch(() => undefined);
+            return;
+        }
+        pendingProviderInstalls.delete(installId);
+        await interaction.deferUpdate();
+        await interaction.editReply({
+            content: `Installing ${pending.label}...\n\`${pending.command}\``,
+            embeds: [],
+            attachments: [],
+            components: []
+        });
+
+        try {
+            await execFileAsync('sh', ['-lc', pending.command], {
+                cwd: this.config.defaultWorkspace,
+                timeout: 5 * 60 * 1000,
+                maxBuffer: 128 * 1024
+            });
+        } catch (error) {
+            await interaction.editReply({
+                content: `Install failed for \`${pending.executable}\`.\n\n${this.trimError(error instanceof Error ? error.message : String(error))}`,
+                components: []
+            });
+            return;
+        }
+
+        await interaction.editReply({
+            content: `Installed ${pending.label}. Retrying now.`,
+            components: []
+        });
+        await this.runProviderInstallRetry(interaction, pending.retry);
+    }
+
+    private async runProviderInstallRetry(interaction: ButtonInteraction, retry: LimitRetry): Promise<void> {
+        if (retry.kind === 'review') {
+            await this.runReview(interaction.message as Message, retry.options);
+            return;
+        }
+
+        await this.runPrompt(interaction.message as Message, retry.conversationKey, retry.prompt, {
+            ...retry.options,
+            fresh: false
+        });
     }
 
     private async runPendingLimitRetry(interaction: ComponentInteraction, retryId: string, overrides: Partial<PromptOptions>): Promise<void> {
@@ -1548,13 +1748,46 @@ export class DiscordCodexBridge {
         ].filter(Boolean).join('\n');
     }
 
+    private withImageGenerationGuidance(prompt: string): string {
+        if (!/\b(generate|create|make|edit|render)\b/i.test(prompt) || !/\b(image|picture|photo|illustration|sprite|icon|texture|mockup)\b/i.test(prompt)) {
+            return prompt;
+        }
+
+        return [
+            prompt,
+            '',
+            'Image generation guidance:',
+            'If the active provider has an image generation or editing tool, use it directly.',
+            'If it can only create files, write the generated image to a PNG, JPG, GIF, or WEBP file in the workspace and include the absolute file path in the final response so Discode can attach it.',
+            'Keep image assets reasonably sized and avoid generating unnecessary intermediate files.'
+        ].join('\n');
+    }
+
+    private withSubagentGuidance(prompt: string): string {
+        if (!/\b(sub-?agents?|explore agents?|general agents?|parallel agents?)\b/i.test(prompt)) return prompt;
+
+        return [
+            prompt,
+            '',
+            'Sub-agent guidance:',
+            'When the active provider exposes sub-agents, use focused explorer agents for codebase discovery and general agents for bounded implementation work.',
+            'Keep delegated tasks small, avoid duplicate work, and summarize which named agents contributed to the final answer.'
+        ].join('\n');
+    }
+
     private withPromptGuidance(prompt: string, tools = parseToolTags(prompt)): string {
-        return this.withRobloxMcpGuidance(withToolTagGuidance(prompt, tools));
+        return this.withSubagentGuidance(this.withImageGenerationGuidance(this.withRobloxMcpGuidance(withToolTagGuidance(prompt, tools))));
     }
 
     private isPublishRequest(prompt: string): boolean {
         return /\b(publish|push live|push to production|deploy|release to production)\b/i.test(prompt)
             && /\b(roblox|studio|place|game|production|live)\b/i.test(prompt);
+    }
+
+    private isDirectoryExplorerRequest(prompt: string): boolean {
+        return /\b(show|open|browse|list|explore)\b/i.test(prompt)
+            && /\b(files?|directory|folder|workspace|project tree|file tree)\b/i.test(prompt)
+            && !/\b(edit|fix|write|create|delete|remove|move|rename)\b/i.test(prompt);
     }
 
     private async createNaturalToolPrompt(message: Message, client: Client, request: string): Promise<string | null> {
@@ -1625,7 +1858,7 @@ export class DiscordCodexBridge {
             embeds: [],
             attachments: [],
             components,
-            files: [new AttachmentBuilder(image, { name: 'codex-chats.png' })]
+            files: [new AttachmentBuilder(image, { name: `${this.commandName}-chats.png` })]
         });
         this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, components.length > 0);
     }
@@ -1923,6 +2156,95 @@ export class DiscordCodexBridge {
         this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, dashboard.components.length > 0);
     }
 
+    private async showFileExplorer(interaction: ChatInputCommandInteraction | ButtonInteraction, workspace?: string): Promise<void> {
+        const project = await this.resolveProject(workspace || undefined);
+        const image = await renderFileExplorerCard({
+            title: path.basename(project.workspace) || 'Directory',
+            workspace: project.workspace,
+            entries: await this.readDirectoryEntries(project.workspace),
+            generatedAt: new Date().toLocaleString()
+        });
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+                .setCustomId(WORKSPACE_ADD_BUTTON_ID)
+                .setLabel('Add directory')
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId(TERMINAL_RUN_BUTTON_ID)
+                .setLabel('Run terminal')
+                .setStyle(ButtonStyle.Secondary)
+        );
+        const payload = {
+            content: '',
+            embeds: [],
+            attachments: [],
+            components: [row],
+            files: [new AttachmentBuilder(image, { name: `${this.commandName}-files.png` })]
+        };
+
+        if (interaction instanceof ButtonInteraction) {
+            await interaction.update(payload);
+            this.scheduleComponentExpiry(interaction.message, true);
+            return;
+        }
+
+        await interaction.reply({
+            ...payload,
+            ...(await this.getSlashReplyOptions())
+        });
+        this.scheduleComponentExpiry(await interaction.fetchReply().catch(() => null) as Message | null, true);
+    }
+
+    private async sendFileExplorerMessage(message: Message, request: string): Promise<void> {
+        const project = await this.resolveNaturalProject(request) || await this.resolveProject();
+        const image = await renderFileExplorerCard({
+            title: path.basename(project.workspace) || 'Directory',
+            workspace: project.workspace,
+            entries: await this.readDirectoryEntries(project.workspace),
+            generatedAt: new Date().toLocaleString()
+        });
+
+        await message.reply({
+            content: '',
+            embeds: [],
+            files: [new AttachmentBuilder(image, { name: `${this.commandName}-files.png` })]
+        });
+    }
+
+    private async readDirectoryEntries(workspace: string): Promise<FileExplorerEntry[]> {
+        const entries = await readdir(workspace, { withFileTypes: true }).catch(() => []);
+
+        return entries
+            .filter(entry => !entry.name.startsWith('.') && entry.name !== 'node_modules' && entry.name !== 'dist')
+            .sort((left, right) => Number(right.isDirectory()) - Number(left.isDirectory()) || left.name.localeCompare(right.name))
+            .slice(0, 36)
+            .map(entry => {
+                const fullPath = path.join(workspace, entry.name);
+                const stats = statSync(fullPath, { throwIfNoEntry: false });
+
+                return {
+                    name: entry.name,
+                    kind: entry.isDirectory() ? 'dir' as const : 'file' as const,
+                    size: entry.isDirectory() ? `${this.countImmediateChildren(fullPath)} items` : this.formatBytes(stats?.size || 0)
+                };
+            });
+    }
+
+    private countImmediateChildren(directory: string): number {
+        try {
+            return readdirSync(directory).filter(name => !name.startsWith('.')).length;
+        } catch {
+            return 0;
+        }
+    }
+
+    private formatBytes(value: number): string {
+        if (value < 1024) return `${value} B`;
+        if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+
+        return `${(value / 1024 / 1024).toFixed(1)} MB`;
+    }
+
     private async showTerminalDashboard(interaction: ChatInputCommandInteraction): Promise<void> {
         const project = await this.resolveProject();
         const git = await this.getGitStatus(project.workspace);
@@ -1996,6 +2318,10 @@ export class DiscordCodexBridge {
                     .setLabel('Add directory')
                     .setStyle(ButtonStyle.Primary),
                 new ButtonBuilder()
+                    .setCustomId(FILE_EXPLORER_BUTTON_ID)
+                    .setLabel('Browse files')
+                    .setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
                     .setCustomId(TERMINAL_RUN_BUTTON_ID)
                     .setLabel('Run terminal')
                     .setStyle(ButtonStyle.Secondary),
@@ -2067,7 +2393,7 @@ export class DiscordCodexBridge {
 
         return this.createUsageDashboardView(sessionId, page) || {
             components: [],
-            files: [new AttachmentBuilder(pages[0], { name: 'codex-usage.png' })]
+            files: [new AttachmentBuilder(pages[0], { name: `${this.commandName}-usage.png` })]
         };
     }
 
@@ -2081,7 +2407,7 @@ export class DiscordCodexBridge {
 
         return {
             components: this.createUsageRows(normalizedPage, sessionId, session.accounts),
-            files: [new AttachmentBuilder(session.pages[normalizedPage], { name: `codex-usage-${sessionId}-${normalizedPage + 1}.png` })]
+            files: [new AttachmentBuilder(session.pages[normalizedPage], { name: `${this.commandName}-usage-${sessionId}-${normalizedPage + 1}.png` })]
         };
     }
 
@@ -2270,6 +2596,12 @@ export class DiscordCodexBridge {
         });
     }
 
+    private trimError(value: string): string {
+        const clean = sanitizeDiscordText(this.formatDiscordOutput(value || '')).trim();
+
+        return clean.length > 900 ? `${clean.slice(0, 897).trimEnd()}...` : clean;
+    }
+
     private async sendPages(target: ResponseTarget, text: string, result?: CodexRunResult): Promise<Message | null> {
         const formatted = sanitizeDiscordText(this.formatDiscordOutput(text || `${this.botName} completed with no final message.`));
         const pages = splitDiscordText(formatted);
@@ -2371,7 +2703,7 @@ export class DiscordCodexBridge {
 
             if (now - lastUpdate < 2500) return;
             lastUpdate = now;
-            const file = new AttachmentBuilder(await renderThinkingGif(render(), this.botName), { name: `${this.commandName}-thinking.gif` });
+            const file = new AttachmentBuilder(await renderThinkingGif(render(), this.botName, await this.createAgentRoster(render())), { name: `${this.commandName}-thinking.gif` });
             const payload = {
                 content: '',
                 embeds: [],
@@ -2407,6 +2739,25 @@ export class DiscordCodexBridge {
                 await pending;
             }
         };
+    }
+
+    private async createAgentRoster(task: string): Promise<AgentStatus[]> {
+        const settings = await getBridgeSettings();
+        const names = getEffectiveAgentNames(settings);
+        const normalized = task.toLowerCase();
+        const roles = [
+            { role: 'General', active: true },
+            { role: 'Explore', active: /\b(inspect|search|read|files?|workspace|directory|project|explor)/i.test(normalized) },
+            { role: 'Review', active: /\b(review|test|check|verify|bug|failure|fix)\b/i.test(normalized) },
+            { role: 'Implement', active: /\b(edit|build|implement|create|update|write|patch)\b/i.test(normalized) }
+        ];
+
+        return roles.map((item, index) => ({
+            name: names[index % names.length] || `Agent ${index + 1}`,
+            role: item.role,
+            color: AGENT_COLORS[index % AGENT_COLORS.length],
+            active: item.active
+        }));
     }
 
     private withFooter(text: string, result: CodexRunResult): string {
@@ -2457,6 +2808,7 @@ export class DiscordCodexBridge {
         const slashResponsesEphemeral = getEffectiveSlashResponsesEphemeral(settings);
         const finalResponsesAsImages = getEffectiveFinalResponsesAsImages(settings);
         const autoSwitchOnLimit = getEffectiveAutoSwitchOnLimit(settings, this.config.autoSwitchOnLimit);
+        const agentNamingMode: AgentNamingMode = settings.agentNamingMode === 'custom' ? 'custom' : 'greek';
         const modelOptions = listModelChoices().map(choice => ({
             label: choice.name.slice(0, 100),
             value: choice.value,
@@ -2555,6 +2907,21 @@ export class DiscordCodexBridge {
                             { label: 'Images', value: 'images', description: 'Render final agent replies as clean image cards.', default: finalResponsesAsImages },
                             { label: 'Text', value: 'text', description: 'Send final agent replies as Discord text.', default: !finalResponsesAsImages }
                         ])
+                ),
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                    new StringSelectMenuBuilder()
+                        .setCustomId(AGENT_NAMING_SELECT_ID)
+                        .setPlaceholder(`Agent names: ${agentNamingMode === 'custom' ? 'Custom' : 'Greek'}`)
+                        .addOptions([
+                            { label: 'Greek', value: 'greek', description: 'Use the built-in Greek agent roster.', default: agentNamingMode === 'greek' },
+                            { label: 'Custom', value: 'custom', description: 'Use your custom agent names.', default: agentNamingMode === 'custom' }
+                        ])
+                ),
+                new ActionRowBuilder<ButtonBuilder>().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(AGENT_NAMES_BUTTON_ID)
+                        .setLabel('Edit agent names')
+                        .setStyle(ButtonStyle.Secondary)
                 ),
                 new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
                     new StringSelectMenuBuilder()
@@ -2763,6 +3130,25 @@ export class DiscordCodexBridge {
                         .setLabel('Primary notification user ID')
                         .setStyle(TextInputStyle.Short)
                         .setValue(primaryAllowedUserId)
+                        .setRequired(false)
+                )
+            );
+    }
+
+    private async createAgentNamesModal(): Promise<ModalBuilder> {
+        const settings = await getBridgeSettings();
+        const names = Array.isArray(settings.customAgentNames) ? settings.customAgentNames : [];
+
+        return new ModalBuilder()
+            .setCustomId(AGENT_NAMES_MODAL_ID)
+            .setTitle('Agent names')
+            .addComponents(
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('agentNames')
+                        .setLabel('Names, comma separated')
+                        .setStyle(TextInputStyle.Paragraph)
+                        .setValue(names.join(', '))
                         .setRequired(false)
                 )
             );
@@ -3078,7 +3464,7 @@ export class DiscordCodexBridge {
 
         if (newProjectName) {
             const name = this.cleanProjectName(newProjectName);
-            const workspace = path.join(os.homedir(), 'CodexProjects', this.slugProjectName(name));
+            const workspace = path.join(os.homedir(), 'DiscodeProjects', this.slugProjectName(name));
 
             await mkdir(workspace, { recursive: true });
             return saveProject({ name, workspace });
@@ -3131,7 +3517,7 @@ export class DiscordCodexBridge {
     private isAgentThreadName(name: string): boolean {
         const normalized = name.toLowerCase();
 
-        return normalized.startsWith(`${this.commandName}-`) || normalized.startsWith('codex-');
+        return normalized.startsWith(`${this.commandName}-`);
     }
 
     private cleanBotName(value: string): string {
@@ -3185,7 +3571,6 @@ export class DiscordCodexBridge {
 
     private isWeakChatName(name: string): boolean {
         const normalized = name
-            .replace(/^codex-/i, '')
             .replace(new RegExp(`^${this.escapeRegExp(this.commandName)}-`, 'i'), '')
             .replace(/https?:\/\/\S+/g, '')
             .replace(/[^\w\s.-]/g, '')
@@ -3208,9 +3593,11 @@ export class DiscordCodexBridge {
     }
 
     private getAccountAlias(account: AccountSummary): string {
-        const name = GREEK_ACCOUNT_NAMES[(account.index - 1) % GREEK_ACCOUNT_NAMES.length];
+        const zeroIndex = Math.max(0, account.index - 1);
+        const adjective = ACCOUNT_ADJECTIVES[zeroIndex % ACCOUNT_ADJECTIVES.length];
+        const noun = ACCOUNT_NOUNS[Math.floor(zeroIndex / ACCOUNT_ADJECTIVES.length) % ACCOUNT_NOUNS.length];
 
-        return `${name} #${account.index}`;
+        return `${adjective} ${noun} #${account.index}`;
     }
 
     private capitalize(value: string): string {

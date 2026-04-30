@@ -1,4 +1,4 @@
-import sharp from 'sharp';
+import { renderSvgToPng } from './rendering.js';
 
 export interface UsageCardWindow {
     label: string;
@@ -46,11 +46,11 @@ const WIDTH = 1200;
 const HEIGHT = 760;
 
 export async function renderUsageCard(data: UsageCardData): Promise<Buffer> {
-    return sharp(Buffer.from(renderSvg(data))).png().toBuffer();
+    return renderSvgToPng(renderSvg(data));
 }
 
 export async function renderUsageOverviewCard(data: UsageOverviewData): Promise<Buffer> {
-    return sharp(Buffer.from(renderOverviewSvg(data))).png().toBuffer();
+    return renderSvgToPng(renderOverviewSvg(data));
 }
 
 function renderSvg(data: UsageCardData): string {

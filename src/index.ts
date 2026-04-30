@@ -8,6 +8,11 @@ import { registerSlashCommands } from './discord/commands.js';
 import { checkForUpdate, formatUpdateNotice } from './update/checker.js';
 
 const config = loadConfig();
+const colorEnabled = process.stdout.isTTY && process.env.NO_COLOR !== '1' && process.env.NO_COLOR !== 'true';
+const color = (value: string, code: string): string => colorEnabled ? `${code}${value}\x1b[0m` : value;
+const ok = (value: string): void => console.log(`${color('ok', '\x1b[32m')} ${value}`);
+const info = (value: string): void => console.log(`${color('info', '\x1b[36m')} ${value}`);
+const warn = (value: string): void => console.warn(`${color('warn', '\x1b[33m')} ${value}`);
 
 if (!config.token) {
     throw new Error('DISCORD_TOKEN is required. Add it to .env or the process environment.');
@@ -36,16 +41,16 @@ const client = new Client({
 
 client.once(Events.ClientReady, async () => {
     const botName = client.user?.username || 'Discode';
-    console.log(`Discode logged in as ${client.user?.tag}`);
+    ok(`Connected as ${client.user?.tag}`);
 
     try {
         const registered = await registerSlashCommands(config, botName, [...client.guilds.cache.keys()]);
         bridge.setBotIdentity(botName, registered.primaryName);
-        console.log(`Registered slash commands: ${registered.names.join(', ')}.`);
+        ok(`Slash commands ready: ${registered.names.join(', ')}`);
         const updateStatus = await checkForUpdate(process.cwd());
         const updateNotice = formatUpdateNotice(updateStatus);
 
-        if (updateNotice) console.log(updateNotice);
+        if (updateNotice) info(updateNotice);
         await bridge.recoverRunningRuns(client);
     } catch (error) {
         console.error('Failed to register slash commands:', error);
@@ -115,11 +120,11 @@ client.on(Events.MessageCreate, async message => {
 });
 
 client.on('error', error => {
-    console.warn('Discord client error:', error);
+    warn(`Discord client error: ${String(error)}`);
 });
 
 process.on('unhandledRejection', error => {
-    console.warn('Unhandled rejection:', error);
+    warn(`Unhandled rejection: ${String(error)}`);
 });
 
 await client.login(config.token);

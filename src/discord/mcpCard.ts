@@ -1,11 +1,11 @@
-import sharp from 'sharp';
 import { McpServerRecord } from '../state/mcps.js';
+import { renderSvgToPng } from './rendering.js';
 
 const WIDTH = 1100;
 const HEIGHT = 620;
 
 export async function renderMcpCard(servers: McpServerRecord[]): Promise<Buffer> {
-    return sharp(Buffer.from(renderSvg(servers))).png().toBuffer();
+    return renderSvgToPng(renderSvg(servers));
 }
 
 function renderSvg(servers: McpServerRecord[]): string {
