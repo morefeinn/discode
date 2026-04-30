@@ -43,21 +43,56 @@ function color(value, code) {
     return colorEnabled ? `${code}${value}${colors.reset}` : value;
 }
 
+function stripAnsi(value) {
+    return String(value).replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+function box(titleValue, rows = []) {
+    const cleanRows = rows.map(row => String(row));
+    const width = Math.max(
+        stripAnsi(titleValue).length,
+        ...cleanRows.map(row => stripAnsi(row).length),
+        28
+    );
+    const top = `+-- ${titleValue} ${'-'.repeat(Math.max(0, width - stripAnsi(titleValue).length - 1))}+`;
+    const body = cleanRows.map(row => {
+        const padding = ' '.repeat(Math.max(0, width - stripAnsi(row).length));
+
+        return `| ${row}${padding} |`;
+    });
+    const bottom = `+${'-'.repeat(width + 2)}+`;
+
+    console.log(color(top, colors.cyan));
+    for (const line of body) console.log(line);
+    console.log(color(bottom, colors.cyan));
+}
+
+function banner(subtitle) {
+    box(color(`Discode ${packageJson.version}`, colors.bold), [
+        subtitle,
+        color(rootDir, colors.gray)
+    ]);
+}
+
+function row(label, value) {
+    return `${color(label.padEnd(18), colors.gray)} ${value}`;
+}
+
 function title(value) {
-    console.log(color(`\n${value}`, colors.bold));
-    console.log(color('-'.repeat(value.length), colors.dim));
+    console.log('');
+    console.log(color(`== ${value}`, colors.bold));
 }
 
 function note(value) {
-    console.log(`${color('info', colors.cyan)} ${value}`);
+    console.log(`${color('info ', colors.cyan)} ${value}`);
 }
 
 function success(value) {
-    console.log(`${color('ok', colors.green)} ${value}`);
+    console.log(`${color('ok   ', colors.green)} ${value}`);
 }
 
 function warn(value) {
-    console.log(`${color('warn', colors.yellow)} ${value}`);
+    console.log(`${color('warn ', colors.yellow)} ${value}`);
 }
 
 function fail(value) {
@@ -65,7 +100,7 @@ function fail(value) {
 }
 
 function promptText(value) {
-    return color(`? ${value}`, colors.cyan);
+    return color(`> ${value}`, colors.cyan);
 }
 
 function hasFlag(name) {
@@ -164,10 +199,10 @@ async function checkDependencies(rl, headless) {
     const missingRecommended = recommended.filter(name => !commandExists(name));
 
     if (missingRequired.length === 0 && missingRecommended.length === 0) {
-        success('Runtime dependencies are available.');
+        success('Runtime dependencies are available');
         return;
     }
-    title('Dependency check');
+    title('Dependencies');
 
     for (const name of missingRequired) {
         warn(`Missing required dependency: ${name}`);
@@ -196,7 +231,7 @@ async function checkDependencies(rl, headless) {
         if (result.status !== 0 && missingRequired.includes(name)) {
             throw new Error(`Failed to install ${name}.`);
         }
-        if (result.status === 0) success(`Installed ${name}.`);
+        if (result.status === 0) success(`Installed ${name}`);
     }
 }
 
@@ -312,10 +347,10 @@ async function setup() {
     const rl = createPrompter();
 
     try {
-        title('Discode setup');
-        note('Configure Discord access, provider routing, and local credentials.');
+        banner('Installer');
+        note('Configure Discord access, provider routing, and local credentials');
         await checkDependencies(rl, headless);
-        title('Required');
+        title('Discord');
         const values = {
             DISCORD_TOKEN: await setupValue(rl, { label: 'Discord bot token', flag: 'token', current: existing.DISCORD_TOKEN, required: true, headless }),
             DISCORD_CLIENT_ID: await setupValue(rl, { label: 'Discord client id', flag: 'client-id', current: existing.DISCORD_CLIENT_ID, required: true, headless }),
@@ -359,7 +394,7 @@ async function setup() {
         values.DISCODE_EXTENSION_ROBLOX_PLACE_ID = flagValue('roblox-place-id') || existing.DISCODE_EXTENSION_ROBLOX_PLACE_ID || '';
 
         if (configureRuntime) {
-            title('Runtime');
+            title('Harness runtime');
             values.DISCODE_COMMAND_NAME = await setupValue(rl, { label: 'Slash command name override', flag: 'command-name', current: existing.DISCODE_COMMAND_NAME, headless });
             values.DEFAULT_WORKSPACE = await setupValue(rl, { label: 'Initial workspace', flag: 'workspace', current: existing.DEFAULT_WORKSPACE, fallback: process.cwd(), headless });
             values.DEFAULT_MODEL = await setupValue(rl, { label: 'Model override, blank uses provider default', flag: 'model', current: existing.DEFAULT_MODEL, headless });
@@ -393,9 +428,13 @@ async function setup() {
         writeEnvValues(values);
         ensureDataDir();
         await maybeImportCredentials(rl, headless);
-        title('Ready');
-        success('Wrote .env');
-        note('Run `discode start` to launch Discode.');
+        console.log('');
+        box(color('Ready', colors.green), [
+            row('env', '.env written with mode 0600'),
+            row('harness', values.DISCODE_PROVIDER || 'discode'),
+            row('workspace', values.DEFAULT_WORKSPACE || 'set later in Discord'),
+            row('next', 'discode start')
+        ]);
     } finally {
         rl.close();
     }
@@ -433,7 +472,7 @@ async function importCredentials(candidates = null) {
         warn(`No new credentials imported. ${result.skipped.length} already configured.`);
         return;
     }
-    success(`Imported ${result.imported.length} credential${result.imported.length === 1 ? '' : 's'}.`);
+    success(`Imported ${result.imported.length} credential${result.imported.length === 1 ? '' : 's'}`);
     for (const account of result.imported.slice(0, 8)) {
         note(`${account.provider} ${account.name}`);
     }
@@ -441,6 +480,10 @@ async function importCredentials(candidates = null) {
 
 function startForeground() {
     stopExistingInstances();
+    banner('Starting foreground runner');
+    console.log(row('mode', 'foreground'));
+    console.log(row('harness', getRuntimeEnv().DISCODE_PROVIDER || 'discode'));
+    console.log(row('logs', 'stdout'));
     const child = spawn(resolveRuntime(), [path.join(rootDir, 'src/index.ts')], {
         cwd: rootDir,
         env: getRuntimeEnv(),
@@ -465,10 +508,10 @@ function startBackground() {
 
     child.unref();
     fs.writeFileSync(pidPath, `${child.pid}\n`);
-    title(`Discode ${packageJson.version}`);
-    success('Started in the background.');
-    note(`pid  ${child.pid}`);
-    note(`logs ${logPath}`);
+    banner('Started background runner');
+    console.log(row('pid', child.pid));
+    console.log(row('harness', getRuntimeEnv().DISCODE_PROVIDER || 'discode'));
+    console.log(row('logs', logPath));
 }
 
 function stop() {
@@ -483,7 +526,7 @@ function stopExistingInstances() {
     if (isProcessRunning(pid)) {
         process.kill(pid, 'SIGTERM');
         stopped.add(pid);
-        success(`Stopped existing Discode pid ${pid}.`);
+        success(`Stopped existing Discode pid ${pid}`);
     }
     fs.rmSync(pidPath, { force: true });
     const pattern = `${rootDir}/src/index.ts`;
@@ -498,7 +541,7 @@ function stopExistingInstances() {
 
         try {
             process.kill(foundPid, 'SIGTERM');
-            success(`Stopped existing Discode pid ${foundPid}.`);
+            success(`Stopped existing Discode pid ${foundPid}`);
         } catch {
         }
     }
@@ -508,13 +551,14 @@ function status() {
     const pid = readPid();
 
     if (isProcessRunning(pid)) {
-        title(`Discode ${packageJson.version}`);
-        success('Running.');
-        note(`pid  ${pid}`);
-        note(`logs ${logPath}`);
+        banner('Status');
+        console.log(row('state', color('running', colors.green)));
+        console.log(row('pid', pid));
+        console.log(row('logs', logPath));
         return;
     }
-    warn('Discode is stopped.');
+    banner('Status');
+    console.log(row('state', color('stopped', colors.yellow)));
 }
 
 function logs() {
@@ -524,6 +568,7 @@ function logs() {
     }
     const text = fs.readFileSync(logPath, 'utf8');
     const lines = text.split('\n').slice(-80).join('\n');
+    banner('Recent logs');
     console.log(lines);
 }
 
@@ -548,15 +593,17 @@ async function printUpdateNoticeIfNeeded() {
 }
 
 async function checkUpdates() {
+    banner('Update check');
     const status = await checkForUpdate(rootDir, true);
 
     if (!status.ok) {
-        console.log(`Could not check for updates: ${status.error || 'unknown error'}`);
+        warn(`Could not check for updates: ${status.error || 'unknown error'}`);
         return;
     }
 
     if (!status.updateAvailable) {
-        console.log(`Discode is up to date (${status.current}).`);
+        console.log(row('state', color('up to date', colors.green)));
+        console.log(row('version', status.current));
         return;
     }
 
@@ -564,6 +611,7 @@ async function checkUpdates() {
 }
 
 async function updateDiscode() {
+    banner('Updater');
     const status = await checkForUpdate(rootDir, true);
 
     if (!status.ok) {
@@ -571,7 +619,8 @@ async function updateDiscode() {
     }
 
     if (!status.updateAvailable) {
-        console.log(`Discode is already up to date (${status.current}).`);
+        console.log(row('state', color('up to date', colors.green)));
+        console.log(row('version', status.current));
         return;
     }
 
@@ -581,11 +630,18 @@ async function updateDiscode() {
         throw new Error('Discode has local changes. Commit or stash them before running discode update.');
     }
 
+    console.log(row('current', status.current));
+    console.log(row('latest', status.latest));
+    note('Pulling latest source');
     runChecked('git', ['pull', '--ff-only', 'origin', 'main']);
+    note('Installing dependencies');
     runChecked(resolveRuntime(), ['install']);
     await markUpdateNotified(rootDir, 'cliLatest', status.latest);
     await markUpdateNotified(rootDir, 'discordLatest', status.latest);
-    console.log('Discode updated. Run `discode restart` to use the new version.');
+    box(color('Updated', colors.green), [
+        row('version', status.latest),
+        row('next', 'discode restart')
+    ]);
 }
 
 function runChecked(bin, args) {
@@ -600,25 +656,29 @@ function runChecked(bin, args) {
 }
 
 function help() {
-    console.log(`${color(`discode ${packageJson.version}`, colors.bold)}
+    banner('Command line');
+    console.log('');
+    console.log(color('Usage', colors.bold));
+    console.log('  discode <command>');
+    console.log('');
+    console.log(color('Commands', colors.bold));
+    const commands = [
+        ['setup', 'Run the installer'],
+        ['setup --headless', 'Write .env from flags or environment'],
+        ['credentials import', 'Import local provider credentials'],
+        ['update --check', 'Check for Discode updates'],
+        ['update', 'Update from GitHub'],
+        ['start', 'Start in the foreground'],
+        ['start --background', 'Start in the background'],
+        ['restart', 'Restart in the background'],
+        ['status', 'Show runner status'],
+        ['logs', 'Show recent logs'],
+        ['version', 'Show version']
+    ];
 
-${color('Usage', colors.cyan)}
-  discode <command>
-
-${color('Commands', colors.cyan)}
-  discode setup              Run the Discode installer
-  discode setup --headless   Write .env from flags or environment
-  discode credentials import Import local provider credentials
-  discode version            Show version
-  discode update --check     Check for Discode updates
-  discode update             Update Discode from GitHub
-  discode start              Start in the foreground
-  discode start --background Start in the background
-  discode stop               Stop background bot
-  discode restart            Restart in the background
-  discode status             Show background status
-  discode logs               Show recent background logs
-`);
+    for (const [name, description] of commands) {
+        console.log(`  ${color(name.padEnd(22), colors.cyan)} ${description}`);
+    }
 }
 
 try {
@@ -645,6 +705,7 @@ try {
     } else if (command === 'stop') {
         stop();
     } else if (command === 'restart') {
+        banner('Restarting runner');
         stop();
         startBackground();
     } else if (command === 'status') {
