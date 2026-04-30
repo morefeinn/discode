@@ -3,7 +3,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import {
@@ -12,6 +11,10 @@ import {
     markUpdateNotified,
     shouldNotifyUpdate
 } from '../src/update/checker.ts';
+import {
+    discoverCredentialCandidates,
+    importCredentialCandidates
+} from '../src/accounts/importers.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const rootDir = path.resolve(path.dirname(__filename), '..');
@@ -20,8 +23,6 @@ const pidPath = path.join(dataDir, 'discode.pid');
 const logPath = path.join(dataDir, 'discode.log');
 const runtimeEnv = getRuntimeEnv();
 const accountsPath = runtimeEnv.DISCODE_ACCOUNTS_PATH || path.join(dataDir, 'accounts.json');
-const legacySwitcherPath = runtimeEnv.CODEX_SWITCHER_IMPORT_PATH || runtimeEnv.CODEX_SWITCHER_PATH || path.join(os.homedir(), '.codex-switcher', 'accounts.json');
-const codexAuthPath = runtimeEnv.CODEX_AUTH_PATH || path.join(os.homedir(), '.codex', 'auth.json');
 const packageJson = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
 
 const command = process.argv[2] || 'help';
@@ -312,7 +313,7 @@ async function setup() {
 
     try {
         title('Discode setup');
-        note('Configure the Discord bot and local agent runtime.');
+        note('Configure Discord access, provider routing, and local credentials.');
         await checkDependencies(rl, headless);
         title('Required');
         const values = {
@@ -340,8 +341,8 @@ async function setup() {
         values.DEFAULT_SANDBOX = flagValue('sandbox') || existing.DEFAULT_SANDBOX || 'workspace-write';
         values.DEFAULT_MODEL = flagValue('model') || existing.DEFAULT_MODEL || '';
         values.DISCODE_MODEL_CHOICES = flagValue('models') || existing.DISCODE_MODEL_CHOICES || '';
-        values.DISCODE_PROVIDER = flagValue('provider') || existing.DISCODE_PROVIDER || 'codex';
-        values.DISCODE_PROVIDER_PRIORITY = flagValue('provider-priority') || existing.DISCODE_PROVIDER_PRIORITY || 'codex,opencode,anthropic,zai,qwen,custom';
+        values.DISCODE_PROVIDER = flagValue('provider') || existing.DISCODE_PROVIDER || 'discode';
+        values.DISCODE_PROVIDER_PRIORITY = flagValue('provider-priority') || existing.DISCODE_PROVIDER_PRIORITY || 'discode,codex,anthropic,zai,qwen,opencode,custom';
         values.DISCODE_PROVIDER_COMMAND = flagValue('provider-command') || existing.DISCODE_PROVIDER_COMMAND || '';
         values.DISCODE_PERMISSION_MODE = flagValue('permission') || existing.DISCODE_PERMISSION_MODE || 'full';
         values.DISCODE_REMINDER_PINGS = flagValue('reminder-pings') || existing.DISCODE_REMINDER_PINGS || 'true';
@@ -352,7 +353,6 @@ async function setup() {
         values.CODEX_BIN = flagValue('codex-bin') || existing.CODEX_BIN || 'codex';
         values.AUTO_SWITCH_ON_LIMIT = flagValue('auto-switch') || existing.AUTO_SWITCH_ON_LIMIT || 'true';
         values.DISCODE_ACCOUNTS_PATH = flagValue('accounts-path') || existing.DISCODE_ACCOUNTS_PATH || '';
-        values.CODEX_SWITCHER_IMPORT_PATH = flagValue('switcher-import-path') || existing.CODEX_SWITCHER_IMPORT_PATH || '';
         values.CODEX_AUTH_PATH = flagValue('codex-auth-path') || existing.CODEX_AUTH_PATH || '';
         values.DISCODE_EXTENSION_ROBLOX_API_KEY = flagValue('roblox-api-key') || existing.DISCODE_EXTENSION_ROBLOX_API_KEY || '';
         values.DISCODE_EXTENSION_ROBLOX_UNIVERSE_ID = flagValue('roblox-universe-id') || existing.DISCODE_EXTENSION_ROBLOX_UNIVERSE_ID || '';
@@ -361,11 +361,11 @@ async function setup() {
         if (configureRuntime) {
             title('Runtime');
             values.DISCODE_COMMAND_NAME = await setupValue(rl, { label: 'Slash command name override', flag: 'command-name', current: existing.DISCODE_COMMAND_NAME, headless });
-            values.DEFAULT_WORKSPACE = await setupValue(rl, { label: 'Default workspace', flag: 'workspace', current: existing.DEFAULT_WORKSPACE, fallback: process.cwd(), headless });
-            values.DEFAULT_MODEL = await setupValue(rl, { label: 'Default model', flag: 'model', current: existing.DEFAULT_MODEL, headless });
-            values.DISCODE_MODEL_CHOICES = await setupValue(rl, { label: 'Model choices, comma separated', flag: 'models', current: existing.DISCODE_MODEL_CHOICES, headless });
-            values.DISCODE_PROVIDER = await setupValue(rl, { label: 'Provider codex/opencode/anthropic/zai/qwen/custom', flag: 'provider', current: existing.DISCODE_PROVIDER, fallback: 'codex', headless });
-            values.DISCODE_PROVIDER_PRIORITY = await setupValue(rl, { label: 'Fallback provider priority', flag: 'provider-priority', current: existing.DISCODE_PROVIDER_PRIORITY, fallback: 'codex,opencode,anthropic,zai,qwen,custom', headless });
+            values.DEFAULT_WORKSPACE = await setupValue(rl, { label: 'Initial workspace', flag: 'workspace', current: existing.DEFAULT_WORKSPACE, fallback: process.cwd(), headless });
+            values.DEFAULT_MODEL = await setupValue(rl, { label: 'Model override, blank uses provider default', flag: 'model', current: existing.DEFAULT_MODEL, headless });
+            values.DISCODE_MODEL_CHOICES = await setupValue(rl, { label: 'Extra model ids, comma separated', flag: 'models', current: existing.DISCODE_MODEL_CHOICES, headless });
+            values.DISCODE_PROVIDER = await setupValue(rl, { label: 'Active provider discode/codex/anthropic/zai/qwen/opencode/custom', flag: 'provider', current: existing.DISCODE_PROVIDER, fallback: 'discode', headless });
+            values.DISCODE_PROVIDER_PRIORITY = await setupValue(rl, { label: 'Load balancer provider order', flag: 'provider-priority', current: existing.DISCODE_PROVIDER_PRIORITY, fallback: 'discode,codex,anthropic,zai,qwen,opencode,custom', headless });
             values.DISCODE_PROVIDER_COMMAND = await setupValue(rl, { label: 'Custom provider command', flag: 'provider-command', current: existing.DISCODE_PROVIDER_COMMAND, headless });
             values.DISCODE_PERMISSION_MODE = await setupValue(rl, { label: 'Permission mode full/directory/auto-review', flag: 'permission', current: existing.DISCODE_PERMISSION_MODE, fallback: 'full', headless });
             values.DISCODE_REMINDER_PINGS = await setupBoolean(rl, { label: 'Completion pings', flag: 'reminder-pings', current: existing.DISCODE_REMINDER_PINGS, fallback: 'true', headless });
@@ -376,7 +376,6 @@ async function setup() {
             values.ZAI_BIN = await setupValue(rl, { label: 'Z.ai CLI binary', flag: 'zai-bin', current: existing.ZAI_BIN, fallback: 'zai', headless });
             values.QWEN_BIN = await setupValue(rl, { label: 'Qwen CLI binary', flag: 'qwen-bin', current: existing.QWEN_BIN, fallback: 'qwen', headless });
             values.DISCODE_ACCOUNTS_PATH = await setupValue(rl, { label: 'Accounts file path', flag: 'accounts-path', current: existing.DISCODE_ACCOUNTS_PATH, headless });
-            values.CODEX_SWITCHER_IMPORT_PATH = await setupValue(rl, { label: 'Codex switcher import path', flag: 'switcher-import-path', current: existing.CODEX_SWITCHER_IMPORT_PATH, headless });
             values.CODEX_AUTH_PATH = await setupValue(rl, { label: 'Codex auth output path', flag: 'codex-auth-path', current: existing.CODEX_AUTH_PATH, headless });
         }
         const configureRoblox = headless
@@ -393,11 +392,50 @@ async function setup() {
 
         writeEnvValues(values);
         ensureDataDir();
+        await maybeImportCredentials(rl, headless);
         title('Ready');
         success('Wrote .env');
         note('Run `discode start` to launch Discode.');
     } finally {
         rl.close();
+    }
+}
+
+async function maybeImportCredentials(rl, headless) {
+    const candidates = await discoverCredentialCandidates(rootDir, getRuntimeEnv());
+
+    if (candidates.length === 0) {
+        note('No existing provider credentials found to import.');
+        return;
+    }
+    title('Credentials');
+    note(`Found ${candidates.length} local credential source${candidates.length === 1 ? '' : 's'}.`);
+    for (const candidate of candidates.slice(0, 8)) {
+        note(`${candidate.provider} from ${candidate.source}`);
+    }
+    const shouldImport = headless
+        ? hasFlag('import-credentials')
+        : !['n', 'no'].includes((await rl.question(promptText('Copy these into Discode accounts now? [Y/n]: '))).trim().toLowerCase());
+
+    if (!shouldImport) return;
+    await importCredentials(candidates);
+}
+
+async function importCredentials(candidates = null) {
+    const discovered = candidates || await discoverCredentialCandidates(rootDir, getRuntimeEnv());
+    if (discovered.length === 0) {
+        warn('No existing provider credentials were found.');
+        return;
+    }
+    const result = await importCredentialCandidates(accountsPath, discovered);
+
+    if (result.imported.length === 0) {
+        warn(`No new credentials imported. ${result.skipped.length} already configured.`);
+        return;
+    }
+    success(`Imported ${result.imported.length} credential${result.imported.length === 1 ? '' : 's'}.`);
+    for (const account of result.imported.slice(0, 8)) {
+        note(`${account.provider} ${account.name}`);
     }
 }
 
@@ -427,8 +465,9 @@ function startBackground() {
 
     child.unref();
     fs.writeFileSync(pidPath, `${child.pid}\n`);
-    success(`Discode started in the background.`);
-    note(`pid ${child.pid}`);
+    title(`Discode ${packageJson.version}`);
+    success('Started in the background.');
+    note(`pid  ${child.pid}`);
     note(`logs ${logPath}`);
 }
 
@@ -469,8 +508,9 @@ function status() {
     const pid = readPid();
 
     if (isProcessRunning(pid)) {
-        success(`Discode is running.`);
-        note(`pid ${pid}`);
+        title(`Discode ${packageJson.version}`);
+        success('Running.');
+        note(`pid  ${pid}`);
         note(`logs ${logPath}`);
         return;
     }
@@ -494,66 +534,6 @@ function resolveRuntime() {
 
     console.error('bun is required to run Discode.');
     process.exit(1);
-}
-
-function readAccountState() {
-    if (fs.existsSync(accountsPath)) {
-        return normalizeAccountState(JSON.parse(fs.readFileSync(accountsPath, 'utf8')));
-    }
-
-    if (fs.existsSync(legacySwitcherPath)) {
-        const imported = importLegacySwitcher(JSON.parse(fs.readFileSync(legacySwitcherPath, 'utf8')));
-        writeAccountState(imported);
-        return imported;
-    }
-
-    return { version: 1, accounts: [] };
-}
-
-function writeAccountState(state) {
-    fs.mkdirSync(path.dirname(accountsPath), { recursive: true });
-    fs.writeFileSync(accountsPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-}
-
-function importLegacySwitcher(state) {
-    return normalizeAccountState({
-        version: 1,
-        active_account_id: state.active_account_id,
-        accounts: (state.accounts || []).map((account, index) => ({
-            id: account.id || `codex-${index + 1}`,
-            name: accountName(account, index),
-            provider: 'codex',
-            email: account.email,
-            plan_type: account.plan_type,
-            subscription_expires_at: account.subscription_expires_at,
-            auth_mode: account.auth_mode || String(account.auth_data?.type || 'session'),
-            auth_data: account.auth_data,
-            last_used_at: account.last_used_at
-        }))
-    });
-}
-
-function normalizeAccountState(state) {
-    return {
-        version: state.version || 1,
-        active_account_id: state.active_account_id,
-        accounts: (state.accounts || []).map((account, index) => ({
-            ...account,
-            id: account.id || `account-${index + 1}`,
-            name: accountName(account, index),
-            provider: normalizeProvider(account.provider)
-        }))
-    };
-}
-
-function normalizeProvider(provider) {
-    return provider === 'opencode'
-        || provider === 'anthropic'
-        || provider === 'zai'
-        || provider === 'qwen'
-        || provider === 'custom'
-        ? provider
-        : 'codex';
 }
 
 async function printUpdateNoticeIfNeeded() {
@@ -628,6 +608,7 @@ ${color('Usage', colors.cyan)}
 ${color('Commands', colors.cyan)}
   discode setup              Run the Discode installer
   discode setup --headless   Write .env from flags or environment
+  discode credentials import Import local provider credentials
   discode version            Show version
   discode update --check     Check for Discode updates
   discode update             Update Discode from GitHub
@@ -645,6 +626,10 @@ try {
 
     if (command === 'setup') {
         await setup();
+    } else if (command === 'credentials' && args[0] === 'import') {
+        await importCredentials();
+    } else if (command === 'accounts' && args[0] === 'import') {
+        await importCredentials();
     } else if (command === 'update') {
         if (args.includes('--check') || args.includes('-c')) {
             await checkUpdates();

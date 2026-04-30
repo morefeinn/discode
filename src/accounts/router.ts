@@ -40,30 +40,16 @@ export interface AccountSummary {
     active: boolean;
 }
 
-interface LegacySwitcherState {
-    version?: number;
-    accounts: DiscodeAccount[];
-    active_account_id?: string;
-}
-
 export class AccountRouter {
     constructor(
         private readonly accountsPath: string,
-        private readonly codexAuthPath: string,
-        private readonly legacySwitcherPath: string
+        private readonly codexAuthPath: string
     ) {}
 
     async readState(): Promise<AccountState> {
         const nativeState = await this.readNativeState();
 
         if (nativeState) return nativeState;
-
-        const importedState = await this.readLegacyState();
-
-        if (importedState) {
-            await this.writeState(importedState);
-            return importedState;
-        }
 
         return { version: 1, accounts: [] };
     }
@@ -85,10 +71,17 @@ export class AccountRouter {
         }));
     }
 
-    async getActiveAccount(): Promise<DiscodeAccount | null> {
+    async getActiveAccount(provider?: AccountProvider | null): Promise<DiscodeAccount | null> {
         const state = await this.readState();
+        const accounts = this.getOrderedAccounts(state).map(item => item.account);
 
-        return state.accounts.find(account => account.id === state.active_account_id) || state.accounts[0] || null;
+        if (provider) {
+            const active = accounts.find(account => account.id === state.active_account_id && this.normalizeProvider(account.provider) === provider);
+
+            return active || accounts.find(account => this.normalizeProvider(account.provider) === provider) || null;
+        }
+
+        return accounts.find(account => account.id === state.active_account_id) || accounts[0] || null;
     }
 
     async getActiveProvider(): Promise<AccountProvider | null> {
@@ -97,14 +90,14 @@ export class AccountRouter {
         return account ? this.normalizeProvider(account.provider) : null;
     }
 
-    async getActiveCommand(): Promise<string | null> {
-        const account = await this.getActiveAccount();
+    async getActiveCommand(provider?: AccountProvider | null): Promise<string | null> {
+        const account = await this.getActiveAccount(provider);
 
         return account?.command?.trim() || null;
     }
 
-    async getActiveEnvironment(): Promise<Record<string, string>> {
-        const account = await this.getActiveAccount();
+    async getActiveEnvironment(provider?: AccountProvider | null): Promise<Record<string, string>> {
+        const account = await this.getActiveAccount(provider);
         const env: Record<string, string> = {};
 
         if (!account) return env;
@@ -150,12 +143,14 @@ export class AccountRouter {
         return account;
     }
 
-    async switchToNext(): Promise<DiscodeAccount | null> {
+    async switchToNext(provider?: AccountProvider | null): Promise<DiscodeAccount | null> {
         const state = await this.readState();
 
         if (state.accounts.length === 0) return null;
 
-        const account = this.findNextAccount(state);
+        const account = this.findNextAccount(state, provider);
+
+        if (!account) return null;
         await this.activateAccount(state, account);
 
         return account;
@@ -199,28 +194,6 @@ export class AccountRouter {
         return this.normalizeState(state);
     }
 
-    private async readLegacyState(): Promise<AccountState | null> {
-        if (!existsSync(this.legacySwitcherPath)) return null;
-
-        const legacy = JSON.parse(await readFile(this.legacySwitcherPath, 'utf8')) as LegacySwitcherState;
-
-        return this.normalizeState({
-            version: 1,
-            active_account_id: legacy.active_account_id,
-            accounts: (legacy.accounts || []).map((account, index) => ({
-                id: account.id || `codex-${index + 1}`,
-                name: this.accountName(account, index),
-                provider: 'codex',
-                email: account.email,
-                plan_type: account.plan_type,
-                subscription_expires_at: account.subscription_expires_at,
-                auth_mode: account.auth_mode || String(account.auth_data?.type || 'session'),
-                auth_data: account.auth_data,
-                last_used_at: account.last_used_at
-            }))
-        });
-    }
-
     private normalizeState(state: AccountState): AccountState {
         return {
             version: state.version || 1,
@@ -239,8 +212,12 @@ export class AccountRouter {
         await writeFile(this.accountsPath, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
     }
 
-    private findNextAccount(state: AccountState): DiscodeAccount {
-        const accounts = this.getOrderedAccounts(state).map(item => item.account);
+    private findNextAccount(state: AccountState, provider?: AccountProvider | null): DiscodeAccount | null {
+        const accounts = this.getOrderedAccounts(state)
+            .map(item => item.account)
+            .filter(account => !provider || this.normalizeProvider(account.provider) === provider);
+
+        if (accounts.length === 0) return null;
         const activeIndex = accounts.findIndex(account => account.id === state.active_account_id);
         const nextIndex = activeIndex < 0 ? 0 : (activeIndex + 1) % accounts.length;
 

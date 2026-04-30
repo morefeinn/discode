@@ -48,11 +48,11 @@ function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: Setting
     const allowedUsers = mergeAllowedUsers(config.allowedUserIds, settings.allowedUserIds || []);
     const rows = page === 'runtime'
         ? [
-            row('Wrapper', label(provider), 166),
+            row('Harness', label(provider), 166),
             row('Model', model, 246),
             row('Reasoning', label(reasoning), 326),
             row('Response style', finalResponsesAsImages ? 'Image cards' : 'Discord text', 406),
-            row('Executable', wrapperLabel(provider, config), 486)
+            row('Runtime', wrapperLabel(provider, config), 486)
         ]
         : page === 'access'
             ? [
@@ -134,7 +134,7 @@ function pageTitle(page: SettingsPage): string {
 }
 
 function pageDescription(page: SettingsPage): string {
-    if (page === 'runtime') return 'Provider, model, reasoning, and wrapper.';
+    if (page === 'runtime') return 'Harness, provider, model, and reasoning.';
     if (page === 'access') return 'Access, sandbox, and publishing.';
     if (page === 'display') return 'Cards, response format, agent names, and interactive controls.';
     if (page === 'failover') return 'Limit handling, account priority, and provider fallback.';
@@ -156,6 +156,7 @@ function commandState(value: string | null): string {
 }
 
 function wrapperLabel(provider: string, config: BridgeConfig): string {
+    if (provider === 'discode') return 'Native harness';
     if (provider === 'custom') return commandState(config.providerCommand);
     if (provider === 'opencode') return config.opencodeBin;
     if (provider === 'anthropic') return config.anthropicBin;

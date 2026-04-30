@@ -25,7 +25,6 @@ export interface BridgeConfig {
     runTimeoutMs: number;
     autoSwitchOnLimit: boolean;
     accountsPath: string;
-    legacySwitcherImportPath: string;
     codexAuthPath: string;
     extensionRobloxApiKey: string | null;
     extensionRobloxUniverseId: string | null;
@@ -100,7 +99,7 @@ export function loadConfig(): BridgeConfig {
         defaultWorkspace: process.env.DEFAULT_WORKSPACE?.trim() || process.cwd(),
         defaultSandbox: process.env.DEFAULT_SANDBOX?.trim() || 'workspace-write',
         defaultModel: process.env.DEFAULT_MODEL?.trim() || null,
-        defaultProvider: process.env.DISCODE_PROVIDER?.trim() || process.env.DEFAULT_PROVIDER?.trim() || 'codex',
+        defaultProvider: process.env.DISCODE_PROVIDER?.trim() || process.env.DEFAULT_PROVIDER?.trim() || 'discode',
         defaultProviderPriority: readProviderPriority(),
         defaultPermissionMode: process.env.DISCODE_PERMISSION_MODE?.trim() || process.env.DEFAULT_PERMISSION_MODE?.trim() || 'full',
         defaultReminderPings: readBoolean('DISCODE_REMINDER_PINGS', true),
@@ -113,9 +112,6 @@ export function loadConfig(): BridgeConfig {
         runTimeoutMs: readNumber('CODEX_TIMEOUT_MS', 30 * 60 * 1000),
         autoSwitchOnLimit: readBoolean('AUTO_SWITCH_ON_LIMIT', true),
         accountsPath: process.env.DISCODE_ACCOUNTS_PATH?.trim() || path.join(process.cwd(), 'data', 'accounts.json'),
-        legacySwitcherImportPath: process.env.CODEX_SWITCHER_IMPORT_PATH?.trim()
-            || process.env.CODEX_SWITCHER_PATH?.trim()
-            || path.join(os.homedir(), '.codex-switcher', 'accounts.json'),
         codexAuthPath: process.env.CODEX_AUTH_PATH?.trim() || path.join(os.homedir(), '.codex', 'auth.json'),
         extensionRobloxApiKey: process.env.DISCODE_EXTENSION_ROBLOX_API_KEY?.trim()
             || process.env.ROBLOX_API_KEY?.trim()

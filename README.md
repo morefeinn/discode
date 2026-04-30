@@ -41,11 +41,12 @@ Useful optional flags:
 - `--runtime`: enable runtime setup fields in headless mode
 - `--technical`: use the technical setup path
 - `--install-deps`: install missing checked dependencies in headless mode
+- `--import-credentials`: import credentials found in `.env`, Codex auth, or OpenCode auth during setup
 - `--workspace <path>`
-- `--provider codex|opencode|anthropic|zai|qwen|custom`
+- `--provider discode|codex|anthropic|zai|qwen|opencode|custom`
 - `--provider-command <command>`
 - `--permission full|directory|auto-review`
-- `--models <comma-separated-models>`
+- `--models <comma-separated-extra-models>`
 - `--accounts-path <path>`
 - `--roblox`: enable Roblox extension fields
 
@@ -57,6 +58,7 @@ discode update --check
 discode update
 discode start
 discode start --background
+discode credentials import
 discode restart
 discode stop
 discode status
@@ -109,7 +111,7 @@ When a conversation is already running, Discode offers `Steer now` to interrupt 
 
 Discode stores accounts in `data/accounts.json` unless `DISCODE_ACCOUNTS_PATH` is set. The file is local state and is ignored by git.
 
-On first run, Discode can import existing Codex sessions from `~/.codex-switcher/accounts.json`. Set `CODEX_SWITCHER_IMPORT_PATH` to import from a different file. After import, Discode uses its own account store.
+During setup, or later with `discode credentials import`, Discode can copy usable credentials from the local `.env`, `~/.codex/auth.json`, and OpenCode auth files such as `~/.local/share/opencode/auth.json`. After import, Discode uses its own account store and load balancer; it does not depend on codex-switcher.
 
 ```json
 {
@@ -127,8 +129,8 @@ On first run, Discode can import existing Codex sessions from `~/.codex-switcher
       }
     },
     {
-      "id": "wrapper",
-      "name": "Wrapper",
+      "id": "custom-backend",
+      "name": "Custom backend",
       "provider": "custom",
       "auth_mode": "api_key",
       "command": "my-agent --model {model}",
@@ -141,17 +143,30 @@ On first run, Discode can import existing Codex sessions from `~/.codex-switcher
 }
 ```
 
-Supported providers are `codex`, `opencode`, `anthropic`, `zai`, `qwen`, and `custom`. Account `priority` controls account ordering, and `DISCODE_PROVIDER_PRIORITY` controls fallback provider order. Account `env` values and API keys are passed only to child agent processes.
+Supported harnesses are `discode`, `codex`, `anthropic`, `zai`, `qwen`, `opencode`, and `custom`. `discode` is the native harness: it talks to provider APIs directly and can use local computer tools when permissions allow. `DISCODE_PROVIDER` is always the active harness unless a user explicitly switches in settings. Account `priority` controls account ordering inside a provider, and `DISCODE_PROVIDER_PRIORITY` controls fallback order when usage limits are hit. Account `env` values and API keys are passed only to the native harness or child agent processes.
 
-Use the usage dashboard's `Add account` button to add Codex/OpenAI, Anthropic, OpenCode, Z.ai, Qwen, or custom accounts. The flow mirrors OpenCode's provider setup style: use an existing logged-in provider CLI when available, or enter the provider API key locally. API keys are stored in `data/accounts.json` with mode `0600` and injected only into child agent processes.
+Use the usage dashboard's `Add account` button to add Codex/OpenAI, Anthropic, OpenCode, Z.ai, Qwen, or custom accounts. The native Discode harness can use imported API credentials directly. OpenCode remains optional as an import source or fallback wrapper, not the default harness. API keys are stored in `data/accounts.json` with mode `0600` and injected only into Discode's native harness or child agent processes.
 
 If a configured provider CLI is missing from `PATH`, Discode shows an install-and-retry button when it knows the provider package.
 
-Model pickers use the configured model list plus the public models.dev catalog when available, so provider models show whether they support thinking/reasoning and tool calls.
+Model pickers query the active provider API when credentials are available, then fall back to the live models.dev catalog/cache. `DISCODE_MODEL_CHOICES` is only for extra manual IDs; Discode no longer ships a fixed model list.
 
 Usage checks support Codex session usage automatically. Other providers can expose credits or limits by adding `credits_balance`, `remaining_percent`, or a `usage_command` to the account. `usage_command` should print JSON with fields such as `primaryWindow`, `secondaryWindow`, or `creditsBalance`.
 
 Rust backends are supported as custom provider binaries through `DISCODE_PROVIDER=custom` and `DISCODE_PROVIDER_COMMAND`.
+
+## Native Harness
+
+`DISCODE_PROVIDER=discode` runs Discode's own harness instead of a CLI wrapper. The native harness has dedicated modules for:
+
+- provider routing and live model resolution (`src/harness/providers.ts`)
+- tool execution (`src/harness/tools.ts`)
+- recursive subagents (`spawn_subagent`)
+- TCP socket sessions (`socket_open`, `socket_write`, `socket_close`)
+- persistent local processes (`process_start`, `process_write`, `process_read`, `process_stop`)
+- harness runtime orchestration (`src/harness/runtime.ts`)
+
+Native local tools are only exposed when the run permission mode allows full automation. Directory or review-oriented modes answer without host tools.
 
 ## Permissions
 
