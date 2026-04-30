@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
-export type ProviderType = 'discode' | 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'custom';
+export type ProviderType = 'discode' | 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'groq' | 'custom';
 export type PermissionMode = 'full' | 'directory' | 'auto-review';
 export type AgentNamingMode = 'greek' | 'custom';
 export type PersonalityMode = 'default' | 'direct' | 'concise' | 'thorough' | 'friendly' | 'custom';
@@ -42,7 +42,7 @@ interface SettingsFile {
 
 const dataPath = path.resolve('data', 'settings.json');
 export const DEFAULT_MODEL_CHOICE = '__default__';
-export const DEFAULT_PROVIDER_PRIORITY: ProviderType[] = ['discode', 'codex', 'anthropic', 'zai', 'qwen', 'opencode', 'custom'];
+export const DEFAULT_PROVIDER_PRIORITY: ProviderType[] = ['discode', 'codex', 'anthropic', 'zai', 'qwen', 'groq', 'opencode', 'custom'];
 export const DEFAULT_AGENT_NAMES = [
     'Apollo',
     'Athena',
@@ -235,6 +235,7 @@ export function isProviderType(value: unknown): value is ProviderType {
         || value === 'anthropic'
         || value === 'zai'
         || value === 'qwen'
+        || value === 'groq'
         || value === 'custom';
 }
 

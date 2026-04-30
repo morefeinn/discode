@@ -162,6 +162,7 @@ function wrapperLabel(provider: string, config: BridgeConfig): string {
     if (provider === 'anthropic') return config.anthropicBin;
     if (provider === 'zai') return config.zaiBin;
     if (provider === 'qwen') return config.qwenBin;
+    if (provider === 'groq') return 'Native Groq API';
 
     return config.codexBin;
 }

@@ -20,6 +20,7 @@ const providerEnvKeys: Record<AccountProvider, string[]> = {
     anthropic: ['ANTHROPIC_API_KEY'],
     zai: ['ZAI_API_KEY'],
     qwen: ['QWEN_API_KEY', 'DASHSCOPE_API_KEY'],
+    groq: ['GROQ_API_KEY'],
     custom: []
 };
 
@@ -64,7 +65,7 @@ export async function importCredentialCandidates(accountsPath: string, candidate
 function discoverEnvKeys(env: Record<string, string | undefined>): CredentialCandidate[] {
     const candidates: CredentialCandidate[] = [];
 
-    for (const provider of ['opencode', 'codex', 'anthropic', 'zai', 'qwen'] as AccountProvider[]) {
+    for (const provider of ['opencode', 'codex', 'anthropic', 'zai', 'qwen', 'groq'] as AccountProvider[]) {
         for (const key of providerEnvKeys[provider]) {
             const value = env[key]?.trim();
 
@@ -268,6 +269,7 @@ function providerFromId(value: unknown): AccountProvider {
     if (normalized.includes('anthropic') || normalized.includes('claude')) return 'anthropic';
     if (normalized.includes('zai') || normalized.includes('z.ai') || normalized.includes('glm')) return 'zai';
     if (normalized.includes('qwen') || normalized.includes('dashscope') || normalized.includes('alibaba')) return 'qwen';
+    if (normalized.includes('groq')) return 'groq';
     if (normalized.includes('opencode')) return 'opencode';
     if (normalized.includes('custom')) return 'custom';
 
@@ -278,6 +280,7 @@ function defaultEnvKey(provider: AccountProvider): string {
     if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
     if (provider === 'zai') return 'ZAI_API_KEY';
     if (provider === 'qwen') return 'QWEN_API_KEY';
+    if (provider === 'groq') return 'GROQ_API_KEY';
 
     return 'OPENAI_API_KEY';
 }
@@ -286,6 +289,7 @@ function providerLabel(provider: AccountProvider): string {
     if (provider === 'anthropic') return 'Anthropic';
     if (provider === 'zai') return 'Z.ai';
     if (provider === 'qwen') return 'Qwen';
+    if (provider === 'groq') return 'Groq';
     if (provider === 'opencode') return 'OpenCode';
     if (provider === 'custom') return 'Custom';
 

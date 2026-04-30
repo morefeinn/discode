@@ -27,12 +27,15 @@ export function selectBackend(model: string | null | undefined, accountProvider:
     if (prefix === 'anthropic') return 'anthropic';
     if (prefix === 'z-ai' || prefix === 'zai') return 'zai';
     if (prefix === 'qwen' || prefix === 'alibaba') return 'qwen';
+    if (prefix === 'groq') return 'groq';
     if (accountProvider === 'anthropic') return 'anthropic';
     if (accountProvider === 'zai') return 'zai';
     if (accountProvider === 'qwen') return 'qwen';
+    if (accountProvider === 'groq') return 'groq';
     if (env.ANTHROPIC_API_KEY && !env.OPENAI_API_KEY) return 'anthropic';
     if (env.ZAI_API_KEY && !env.OPENAI_API_KEY) return 'zai';
     if ((env.QWEN_API_KEY || env.DASHSCOPE_API_KEY) && !env.OPENAI_API_KEY) return 'qwen';
+    if (env.GROQ_API_KEY && !env.OPENAI_API_KEY) return 'groq';
 
     return env.OPENAI_BASE_URL ? 'custom' : 'openai';
 }
@@ -41,6 +44,7 @@ export function backendToProviderType(backend: NativeBackend): ProviderType {
     if (backend === 'anthropic') return 'anthropic';
     if (backend === 'zai') return 'zai';
     if (backend === 'qwen') return 'qwen';
+    if (backend === 'groq') return 'groq';
     if (backend === 'custom') return 'custom';
 
     return 'codex';
@@ -211,6 +215,7 @@ function normalizeAnthropicUsage(usage: any): CodexUsage | null {
 function openAiBaseUrl(context: HarnessContext): string {
     if (context.backend === 'zai') return context.env.ZAI_BASE_URL || 'https://api.z.ai/api/paas/v4';
     if (context.backend === 'qwen') return context.env.QWEN_BASE_URL || context.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    if (context.backend === 'groq') return context.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1';
 
     return context.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
 }
@@ -222,7 +227,9 @@ function apiKey(context: HarnessContext): string {
             ? context.env.ZAI_API_KEY
             : context.backend === 'qwen'
                 ? context.env.QWEN_API_KEY || context.env.DASHSCOPE_API_KEY
-                : context.env.OPENAI_API_KEY;
+                : context.backend === 'groq'
+                    ? context.env.GROQ_API_KEY
+                    : context.env.OPENAI_API_KEY;
 
     if (!key) throw new Error(`Missing API key for native ${context.backend} harness.`);
 
@@ -235,7 +242,7 @@ function stripProviderPrefix(value: string): string {
     if (!normalized) return '';
     const [prefix, ...rest] = normalized.split('/');
 
-    if (rest.length > 0 && ['openai', 'anthropic', 'z-ai', 'zai', 'qwen', 'alibaba', 'custom'].includes(prefix.toLowerCase())) {
+    if (rest.length > 0 && ['openai', 'anthropic', 'z-ai', 'zai', 'qwen', 'alibaba', 'groq', 'custom'].includes(prefix.toLowerCase())) {
         return rest.join('/');
     }
 

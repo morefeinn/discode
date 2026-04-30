@@ -1,6 +1,6 @@
 import type { CodexEventHandler, CodexRunOptions, CodexUsage } from '../codex/runner.js';
 
-export type NativeBackend = 'openai' | 'anthropic' | 'zai' | 'qwen' | 'custom';
+export type NativeBackend = 'openai' | 'anthropic' | 'zai' | 'qwen' | 'groq' | 'custom';
 
 export interface NativeHarnessResult {
     ok: boolean;

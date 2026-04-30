@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-export type AccountProvider = 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'custom';
+export type AccountProvider = 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'groq' | 'custom';
 
 export interface DiscodeAccount {
     id: string;
@@ -263,6 +263,7 @@ export class AccountRouter {
             || provider === 'anthropic'
             || provider === 'zai'
             || provider === 'qwen'
+            || provider === 'groq'
             || provider === 'custom') {
             return provider;
         }
@@ -315,6 +316,7 @@ export class AccountRouter {
         if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
         if (provider === 'zai') return 'ZAI_API_KEY';
         if (provider === 'qwen') return 'QWEN_API_KEY';
+        if (provider === 'groq') return 'GROQ_API_KEY';
 
         return 'OPENAI_API_KEY';
     }
@@ -340,6 +342,7 @@ export class AccountRouter {
         if (provider === 'anthropic') return 'Anthropic';
         if (provider === 'zai') return 'Z.ai';
         if (provider === 'qwen') return 'Qwen';
+        if (provider === 'groq') return 'Groq';
         if (provider === 'opencode') return 'OpenCode';
 
         return 'Codex';
