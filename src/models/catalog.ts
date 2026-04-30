@@ -92,7 +92,8 @@ function providerIdsFor(provider: ProviderType, providers: Record<string, Models
     if (provider === 'zai') return ['z-ai', 'zai'].filter(id => providers[id]);
     if (provider === 'qwen') return ['alibaba', 'qwen'].filter(id => providers[id]);
     if (provider === 'groq') return ['groq'].filter(id => providers[id]);
-    if (provider === 'opencode' || provider === 'discode') return Object.keys(providers);
+    if (provider === 'opencode') return Object.keys(providers);
+    if (provider === 'discode') return ['openai'].filter(id => providers[id]);
 
     return ['openai'];
 }
@@ -126,12 +127,6 @@ function uniqueModels(models: ModelChoiceMetadata[]): ModelChoiceMetadata[] {
 }
 
 async function readProviderApiModels(provider: ProviderType, env: ModelEnv): Promise<ModelChoiceMetadata[]> {
-    if (provider === 'discode') {
-        const providers: ProviderType[] = ['codex', 'anthropic', 'zai', 'qwen', 'groq', 'custom'];
-        const results = await Promise.all(providers.map(item => readProviderApiModels(item, env).catch(() => [])));
-
-        return results.flat();
-    }
     const request = providerModelRequest(provider, env);
 
     if (!request) return [];

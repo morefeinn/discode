@@ -242,7 +242,7 @@ const RESPONSE_CARD_PREV_ID = 'discode:response-prev';
 const RESPONSE_CARD_NEXT_ID = 'discode:response-next';
 const COMPONENT_IDLE_TTL_MS = 60 * 1000;
 const USAGE_DASHBOARD_TTL_MS = COMPONENT_IDLE_TTL_MS;
-const MODEL_SELECT_PAGE_SIZE = 22;
+const MODEL_SELECT_PAGE_SIZE = 24;
 const ACCOUNT_ADJECTIVES = ['North', 'Bright', 'Clear', 'Prime', 'Stone', 'Swift', 'True', 'Silver', 'Golden', 'Blue', 'Red', 'Green', 'Quiet', 'Open', 'Steady', 'Fresh'];
 const ACCOUNT_NOUNS = ['Harbor', 'Keystone', 'Beacon', 'Ledger', 'Vault', 'Signal', 'Bridge', 'Forge', 'Anchor', 'Summit', 'Field', 'Orbit', 'Relay', 'Crown', 'Path', 'Gate'];
 const AGENT_COLORS = ['#8b5cf6', '#10a37f', '#3b82f6', '#f59e0b', '#ec4899', '#14b8a6'];
@@ -254,14 +254,14 @@ const reasoningChoices: { label: string; value: ReasoningEffort; description: st
     { label: 'XHigh', value: 'xhigh', description: 'Maximum reasoning for complex work.' }
 ];
 const providerChoices: { label: string; value: ProviderType; description: string }[] = [
-    { label: 'Discode', value: 'discode', description: 'Use the native local harness.' },
+    { label: 'Discode', value: 'discode', description: 'Native harness for configured API keys.' },
     { label: 'Codex', value: 'codex', description: 'Use the local Codex CLI.' },
     { label: 'OpenCode', value: 'opencode', description: 'Use an optional opencode CLI wrapper.' },
-    { label: 'Anthropic', value: 'anthropic', description: 'Use an Anthropic-compatible CLI.' },
-    { label: 'Z.ai', value: 'zai', description: 'Use a Z.ai-compatible CLI.' },
-    { label: 'Qwen', value: 'qwen', description: 'Use a Qwen-compatible CLI.' },
-    { label: 'Groq', value: 'groq', description: 'Use Groq through the native harness.' },
-    { label: 'Custom', value: 'custom', description: 'Use any OpenAI-compatible base URL or command.' }
+    { label: 'Anthropic', value: 'anthropic', description: 'Use Anthropic API or CLI credentials.' },
+    { label: 'Z.ai', value: 'zai', description: 'Use Z.ai API or CLI credentials.' },
+    { label: 'Qwen', value: 'qwen', description: 'Use Qwen or DashScope credentials.' },
+    { label: 'Groq', value: 'groq', description: 'Use Groq API credentials.' },
+    { label: 'Custom', value: 'custom', description: 'Use an OpenAI-compatible API URL.' }
 ];
 const accountProviderChoices = providerChoices
     .filter((choice): choice is { label: string; value: AccountProvider; description: string } => choice.value !== 'discode');
@@ -1322,8 +1322,14 @@ export class DiscordCodexBridge {
                 }
             }, true);
 
+            const settings = await getBridgeSettings();
+            const image = await renderSettingsCard(settings, this.config, 'runtime');
+
             await interaction.reply({
                 content: `Added and activated ${account.name}.`,
+                embeds: [],
+                components: await this.createSettingsRows('runtime'),
+                files: [new AttachmentBuilder(image, { name: 'discode-settings-runtime.png' })],
                 flags: MessageFlags.Ephemeral
             });
         }
@@ -2396,7 +2402,7 @@ export class DiscordCodexBridge {
 
     private async showAddAccountProviderPicker(interaction: ButtonInteraction): Promise<void> {
         await interaction.reply({
-            content: 'Choose the provider to add. API keys are stored only in the local Discode account file.',
+            content: 'Add an API key. Choose the provider, paste the key, then pick a model from settings.',
             components: [
                 new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
                     new StringSelectMenuBuilder()
@@ -2416,40 +2422,40 @@ export class DiscordCodexBridge {
     private createAddAccountModal(provider: AccountProvider): ModalBuilder {
         return new ModalBuilder()
             .setCustomId(`${ADD_ACCOUNT_MODAL_ID}:${provider}`)
-            .setTitle(`Add ${this.capitalize(provider)} account`)
+            .setTitle(`Add ${provider === 'custom' ? 'custom API' : this.capitalize(provider)}`)
             .addComponents(
                 new ActionRowBuilder<TextInputBuilder>().addComponents(
                     new TextInputBuilder()
                         .setCustomId('name')
-                        .setLabel('Account name')
+                        .setLabel('Name shown in Discode')
                         .setStyle(TextInputStyle.Short)
                         .setRequired(true)
                 ),
                 new ActionRowBuilder<TextInputBuilder>().addComponents(
                     new TextInputBuilder()
                         .setCustomId('apiKey')
-                        .setLabel(`${this.defaultApiKeyName(provider)} or login note`)
+                        .setLabel(this.apiKeyInputLabel(provider))
                         .setStyle(TextInputStyle.Short)
                         .setRequired(false)
                 ),
                 new ActionRowBuilder<TextInputBuilder>().addComponents(
                     new TextInputBuilder()
                         .setCustomId('email')
-                        .setLabel('Email or label')
+                        .setLabel('Email or label, optional')
                         .setStyle(TextInputStyle.Short)
                         .setRequired(false)
                 ),
                 new ActionRowBuilder<TextInputBuilder>().addComponents(
                     new TextInputBuilder()
                         .setCustomId('priority')
-                        .setLabel('Priority')
+                        .setLabel('Priority, optional')
                         .setStyle(TextInputStyle.Short)
                         .setRequired(false)
                 ),
                 new ActionRowBuilder<TextInputBuilder>().addComponents(
                     new TextInputBuilder()
                         .setCustomId('command')
-                        .setLabel(provider === 'custom' ? 'Base URL or command override' : 'Command override')
+                        .setLabel(provider === 'custom' ? 'API base URL' : 'CLI command override, optional')
                         .setStyle(TextInputStyle.Short)
                         .setRequired(false)
                 )
@@ -2469,7 +2475,7 @@ export class DiscordCodexBridge {
         session.createdAt = Date.now();
 
         return {
-            content: '',
+            content: 'Showing configured provider models only. Use **Custom model** for an exact model ID.',
             components: [
                 this.createModelSelectRow(sessionId, page, activeModel || DEFAULT_MODEL_CHOICE, 'picker'),
                 new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -2485,8 +2491,7 @@ export class DiscordCodexBridge {
     private createModelSelectRow(sessionId: string, page: number, activeModel: string, source: 'settings' | 'picker'): ActionRowBuilder<StringSelectMenuBuilder> {
         const session = modelPickerSessions.get(sessionId);
         const pages = session?.pages || [[]];
-        const pageCount = Math.max(1, pages.length);
-        const normalizedPage = Math.min(Math.max(page, 0), pageCount - 1);
+        const normalizedPage = 0;
         const modelOptions = (pages[normalizedPage] || [])
             .filter(model => model.value !== DEFAULT_MODEL_CHOICE)
             .slice(0, MODEL_SELECT_PAGE_SIZE)
@@ -2498,30 +2503,18 @@ export class DiscordCodexBridge {
             }));
         const options = [
             {
-                label: normalizedPage <= 0 ? 'Previous page' : `Previous page (${normalizedPage}/${pageCount})`,
-                value: `${MODEL_PAGE_PREFIX}:${Math.max(0, normalizedPage - 1)}`,
-                description: normalizedPage <= 0 ? 'Already on the first page.' : 'Show earlier models.',
-                default: false
-            },
-            {
                 label: 'Provider default',
                 value: DEFAULT_MODEL_CHOICE,
                 description: 'Use the configured provider default.',
                 default: activeModel === DEFAULT_MODEL_CHOICE
             },
-            ...modelOptions,
-            {
-                label: normalizedPage >= pageCount - 1 ? 'Next page' : `Next page (${normalizedPage + 2}/${pageCount})`,
-                value: `${MODEL_PAGE_PREFIX}:${Math.min(pageCount - 1, normalizedPage + 1)}`,
-                description: normalizedPage >= pageCount - 1 ? 'Already on the last page.' : 'Show more models.',
-                default: false
-            }
+            ...modelOptions
         ].slice(0, 25);
 
         return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
             new StringSelectMenuBuilder()
                 .setCustomId(`${MODEL_SELECT_ID}:${source}:${sessionId}:${normalizedPage}`)
-                .setPlaceholder(`Model page ${normalizedPage + 1}/${pageCount}`)
+                .setPlaceholder('Model')
                 .addOptions(options)
         );
     }
@@ -2541,6 +2534,17 @@ export class DiscordCodexBridge {
 
     private async getModelChoices(provider: ProviderType): Promise<ModelChoiceMetadata[]> {
         try {
+            if (provider === 'discode') {
+                const providers = await this.getConfiguredModelProviders();
+                const results = await Promise.all(providers.map(async item => {
+                    const accountEnv = await this.accounts.getActiveEnvironment(item);
+
+                    return listAvailableModels(item, false, { ...process.env, ...accountEnv }).catch(() => []);
+                }));
+                const catalog = results.flat();
+
+                if (catalog.length > 0) return this.uniqueModelChoices(catalog);
+            }
             const accountEnv = provider === 'discode'
                 ? await this.accounts.getActiveEnvironment()
                 : await this.accounts.getActiveEnvironment(provider);
@@ -2560,6 +2564,25 @@ export class DiscordCodexBridge {
         })));
     }
 
+    private async getConfiguredModelProviders(): Promise<AccountProvider[]> {
+        const providers = new Set<AccountProvider>();
+        const accounts = await this.accounts.listAccounts().catch(() => []);
+
+        for (const account of accounts) {
+            if (account.provider === 'opencode') continue;
+            providers.add(account.provider);
+        }
+
+        if (process.env.OPENAI_API_KEY) providers.add('codex');
+        if (process.env.ANTHROPIC_API_KEY) providers.add('anthropic');
+        if (process.env.ZAI_API_KEY) providers.add('zai');
+        if (process.env.QWEN_API_KEY || process.env.DASHSCOPE_API_KEY) providers.add('qwen');
+        if (process.env.GROQ_API_KEY) providers.add('groq');
+        if (process.env.OPENAI_BASE_URL) providers.add('custom');
+
+        return Array.from(providers.size > 0 ? providers : new Set<AccountProvider>(['codex']));
+    }
+
     private createModelSession(provider: ProviderType, models: ModelChoiceMetadata[]): string {
         const sessionId = this.createUsageSessionId();
 
@@ -2567,7 +2590,7 @@ export class DiscordCodexBridge {
             id: sessionId,
             provider,
             createdAt: Date.now(),
-            pages: this.chunkModels(models, MODEL_SELECT_PAGE_SIZE)
+            pages: [models.slice(0, MODEL_SELECT_PAGE_SIZE)]
         });
         this.pruneModelPickerSessions();
 
@@ -2586,16 +2609,6 @@ export class DiscordCodexBridge {
 
             return true;
         });
-    }
-
-    private chunkModels(models: ModelChoiceMetadata[], size: number): ModelChoiceMetadata[][] {
-        const chunks: ModelChoiceMetadata[][] = [];
-
-        for (let index = 0; index < models.length; index += size) {
-            chunks.push(models.slice(index, index + size));
-        }
-
-        return chunks.length > 0 ? chunks : [[]];
     }
 
     private async showWorkspaceDashboard(interaction: ChatInputCommandInteraction | ModalSubmitInteraction): Promise<void> {
@@ -3727,10 +3740,11 @@ export class DiscordCodexBridge {
         const pageRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
             new StringSelectMenuBuilder()
                 .setCustomId(SETTINGS_PAGE_SELECT_ID)
-                .setPlaceholder(`Page: ${this.capitalize(page)}`)
+                .setPlaceholder(`Page: ${this.settingsPageLabel(page)}`)
                 .addOptions(settingsPages.map(item => ({
-                    label: this.capitalize(item),
+                    label: this.settingsPageLabel(item),
                     value: item,
+                    description: this.settingsPageDescription(item),
                     default: item === page
                 })))
         );
@@ -3951,16 +3965,43 @@ export class DiscordCodexBridge {
                     .setPlaceholder(`Reasoning: ${this.formatReasoning(reasoning)}`)
                     .addOptions(reasoningOptions)
             ),
-            new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-                new StringSelectMenuBuilder()
-                    .setCustomId(FINAL_RESPONSE_SELECT_ID)
-                    .setPlaceholder(`Response style: ${finalResponsesAsImages ? 'Image cards' : 'Text'}`)
-                    .addOptions([
-                        { label: 'Image cards', value: 'images', description: 'Render final replies as paginated image cards.', default: finalResponsesAsImages },
-                        { label: 'Discord text', value: 'text', description: 'Send final replies as plain Discord markdown.', default: !finalResponsesAsImages }
-                    ])
+            new ActionRowBuilder<ButtonBuilder>().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(ADD_ACCOUNT_BUTTON_ID)
+                    .setLabel('Add API key')
+                    .setStyle(ButtonStyle.Primary),
+                new ButtonBuilder()
+                    .setCustomId(MODEL_CUSTOM_BUTTON_ID)
+                    .setLabel('Custom model')
+                    .setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId(TOKEN_STATS_BUTTON_ID)
+                    .setLabel('Usage stats')
+                    .setStyle(ButtonStyle.Secondary)
             )
         ];
+    }
+
+    private settingsPageLabel(page: SettingsPage): string {
+        if (page === 'runtime') return 'Setup';
+        if (page === 'access') return 'Permissions';
+        if (page === 'notifications') return 'Alerts';
+        if (page === 'display') return 'Output';
+        if (page === 'failover') return 'Fallbacks';
+        if (page === 'memory') return 'Memory';
+
+        return 'Behavior';
+    }
+
+    private settingsPageDescription(page: SettingsPage): string {
+        if (page === 'runtime') return 'Provider, model, API keys.';
+        if (page === 'access') return 'Users and local access.';
+        if (page === 'notifications') return 'Pings and privacy.';
+        if (page === 'display') return 'Images, text, and names.';
+        if (page === 'failover') return 'Limit handling order.';
+        if (page === 'memory') return 'Saved prompt context.';
+
+        return 'Tone and instructions.';
     }
 
     private formatReasoning(reasoning: ReasoningEffort): string {
@@ -3981,6 +4022,12 @@ export class DiscordCodexBridge {
         if (provider === 'groq') return 'GROQ_API_KEY';
 
         return 'OPENAI_API_KEY';
+    }
+
+    private apiKeyInputLabel(provider: AccountProvider): string {
+        if (provider === 'custom') return 'API key';
+
+        return `${this.defaultApiKeyName(provider)} value`;
     }
 
     private createWorkspaceModal(source: 'dashboard' | 'thread' = 'dashboard'): ModalBuilder {

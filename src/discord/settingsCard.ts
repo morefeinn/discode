@@ -48,10 +48,10 @@ function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: Setting
     const allowedUsers = mergeAllowedUsers(config.allowedUserIds, settings.allowedUserIds || []);
     const rows = page === 'runtime'
         ? [
-            row('Harness', label(provider), 166),
+            row('Provider', label(provider), 166),
             row('Model', model, 246),
             row('Reasoning', label(reasoning), 326),
-            row('Response style', finalResponsesAsImages ? 'Image cards' : 'Discord text', 406),
+            row('API keys', 'Add or switch from the buttons below', 406),
             row('Runtime', wrapperLabel(provider, config), 486)
         ]
         : page === 'access'
@@ -123,25 +123,25 @@ function row(labelValue: string, value: string, y: number): string {
 }
 
 function pageTitle(page: SettingsPage): string {
-    if (page === 'runtime') return 'Runtime';
-    if (page === 'access') return 'Access';
-    if (page === 'display') return 'Display';
-    if (page === 'failover') return 'Failover';
+    if (page === 'runtime') return 'Setup';
+    if (page === 'access') return 'Permissions';
+    if (page === 'display') return 'Output';
+    if (page === 'failover') return 'Fallbacks';
     if (page === 'memory') return 'Memory';
-    if (page === 'personality') return 'Personality';
+    if (page === 'personality') return 'Behavior';
 
-    return 'Notifications';
+    return 'Alerts';
 }
 
 function pageDescription(page: SettingsPage): string {
-    if (page === 'runtime') return 'Harness, provider, model, and reasoning.';
-    if (page === 'access') return 'Access, sandbox, and publishing.';
-    if (page === 'display') return 'Cards, response format, agent names, and interactive controls.';
-    if (page === 'failover') return 'Limit handling, account priority, and provider fallback.';
-    if (page === 'memory') return 'Persistent local context injected into agent prompts.';
+    if (page === 'runtime') return 'Provider, model, API keys, and reasoning.';
+    if (page === 'access') return 'Users, sandbox mode, and local machine access.';
+    if (page === 'display') return 'Response format, image cards, and agent names.';
+    if (page === 'failover') return 'Limit handling and provider fallback order.';
+    if (page === 'memory') return 'Persistent local context included in agent prompts.';
     if (page === 'personality') return 'Tone, custom instructions, and response behavior.';
 
-    return 'Privacy, pings, failover, and Discord scope.';
+    return 'Pings, usage alerts, and Discord response visibility.';
 }
 
 function permissionLabel(value: string): string {
