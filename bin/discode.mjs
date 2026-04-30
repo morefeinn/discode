@@ -377,7 +377,7 @@ async function setup() {
         values.DEFAULT_MODEL = flagValue('model') || existing.DEFAULT_MODEL || '';
         values.DISCODE_MODEL_CHOICES = flagValue('models') || existing.DISCODE_MODEL_CHOICES || '';
         values.DISCODE_PROVIDER = flagValue('provider') || existing.DISCODE_PROVIDER || 'discode';
-        values.DISCODE_PROVIDER_PRIORITY = flagValue('provider-priority') || existing.DISCODE_PROVIDER_PRIORITY || 'discode,codex,anthropic,zai,qwen,opencode,custom';
+        values.DISCODE_PROVIDER_PRIORITY = flagValue('provider-priority') || existing.DISCODE_PROVIDER_PRIORITY || 'discode,codex,anthropic,zai,qwen,groq,opencode,custom';
         values.DISCODE_PROVIDER_COMMAND = flagValue('provider-command') || existing.DISCODE_PROVIDER_COMMAND || '';
         values.DISCODE_PERMISSION_MODE = flagValue('permission') || existing.DISCODE_PERMISSION_MODE || 'full';
         values.DISCODE_REMINDER_PINGS = flagValue('reminder-pings') || existing.DISCODE_REMINDER_PINGS || 'true';
@@ -399,8 +399,8 @@ async function setup() {
             values.DEFAULT_WORKSPACE = await setupValue(rl, { label: 'Initial workspace', flag: 'workspace', current: existing.DEFAULT_WORKSPACE, fallback: process.cwd(), headless });
             values.DEFAULT_MODEL = await setupValue(rl, { label: 'Model override, blank uses provider default', flag: 'model', current: existing.DEFAULT_MODEL, headless });
             values.DISCODE_MODEL_CHOICES = await setupValue(rl, { label: 'Extra model ids, comma separated', flag: 'models', current: existing.DISCODE_MODEL_CHOICES, headless });
-            values.DISCODE_PROVIDER = await setupValue(rl, { label: 'Active provider discode/codex/anthropic/zai/qwen/opencode/custom', flag: 'provider', current: existing.DISCODE_PROVIDER, fallback: 'discode', headless });
-            values.DISCODE_PROVIDER_PRIORITY = await setupValue(rl, { label: 'Load balancer provider order', flag: 'provider-priority', current: existing.DISCODE_PROVIDER_PRIORITY, fallback: 'discode,codex,anthropic,zai,qwen,opencode,custom', headless });
+            values.DISCODE_PROVIDER = await setupValue(rl, { label: 'Active provider discode/codex/anthropic/zai/qwen/groq/opencode/custom', flag: 'provider', current: existing.DISCODE_PROVIDER, fallback: 'discode', headless });
+            values.DISCODE_PROVIDER_PRIORITY = await setupValue(rl, { label: 'Load balancer provider order', flag: 'provider-priority', current: existing.DISCODE_PROVIDER_PRIORITY, fallback: 'discode,codex,anthropic,zai,qwen,groq,opencode,custom', headless });
             values.DISCODE_PROVIDER_COMMAND = await setupValue(rl, { label: 'Custom provider command', flag: 'provider-command', current: existing.DISCODE_PROVIDER_COMMAND, headless });
             values.DISCODE_PERMISSION_MODE = await setupValue(rl, { label: 'Permission mode full/directory/auto-review', flag: 'permission', current: existing.DISCODE_PERMISSION_MODE, fallback: 'full', headless });
             values.DISCODE_REMINDER_PINGS = await setupBoolean(rl, { label: 'Completion pings', flag: 'reminder-pings', current: existing.DISCODE_REMINDER_PINGS, fallback: 'true', headless });

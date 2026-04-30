@@ -91,6 +91,7 @@ function providerIdsFor(provider: ProviderType, providers: Record<string, Models
     if (provider === 'anthropic') return ['anthropic'];
     if (provider === 'zai') return ['z-ai', 'zai'].filter(id => providers[id]);
     if (provider === 'qwen') return ['alibaba', 'qwen'].filter(id => providers[id]);
+    if (provider === 'groq') return ['groq'].filter(id => providers[id]);
     if (provider === 'opencode' || provider === 'discode') return Object.keys(providers);
 
     return ['openai'];
@@ -125,6 +126,12 @@ function uniqueModels(models: ModelChoiceMetadata[]): ModelChoiceMetadata[] {
 }
 
 async function readProviderApiModels(provider: ProviderType, env: ModelEnv): Promise<ModelChoiceMetadata[]> {
+    if (provider === 'discode') {
+        const providers: ProviderType[] = ['codex', 'anthropic', 'zai', 'qwen', 'groq', 'custom'];
+        const results = await Promise.all(providers.map(item => readProviderApiModels(item, env).catch(() => [])));
+
+        return results.flat();
+    }
     const request = providerModelRequest(provider, env);
 
     if (!request) return [];
@@ -142,7 +149,7 @@ async function readProviderApiModels(provider: ProviderType, env: ModelEnv): Pro
 
             return {
                 name: stringValue(model?.display_name) || stringValue(model?.name) || id,
-                value: (provider === 'opencode' || provider === 'discode') && !id.includes('/') ? `${request.providerId}/${id}` : id,
+                value: provider === 'opencode' && !id.includes('/') ? `${request.providerId}/${id}` : id,
                 provider: request.label,
                 reasoning: /reason|thinking|gpt-[5-9]|claude|glm|qwen3/i.test(`${id} ${model?.name || ''}`),
                 toolCall: true
@@ -203,6 +210,12 @@ function openAiStyleRequest(provider: ProviderType, env: ModelEnv): { url: strin
             base: env.QWEN_BASE_URL || env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
             providerId: 'qwen',
             label: 'Qwen'
+        },
+        groq: {
+            key: env.GROQ_API_KEY,
+            base: env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
+            providerId: 'groq',
+            label: 'Groq'
         },
         anthropic: {
             providerId: 'anthropic',

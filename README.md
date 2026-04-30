@@ -43,7 +43,7 @@ Useful optional flags:
 - `--install-deps`: install missing checked dependencies in headless mode
 - `--import-credentials`: import credentials found in `.env`, Codex auth, or OpenCode auth during setup
 - `--workspace <path>`
-- `--provider discode|codex|anthropic|zai|qwen|opencode|custom`
+- `--provider discode|codex|anthropic|zai|qwen|groq|opencode|custom`
 - `--provider-command <command>`
 - `--permission full|directory|auto-review`
 - `--models <comma-separated-extra-models>`
@@ -143,9 +143,9 @@ During setup, or later with `discode credentials import`, Discode can copy usabl
 }
 ```
 
-Supported harnesses are `discode`, `codex`, `anthropic`, `zai`, `qwen`, `opencode`, and `custom`. `discode` is the native harness: it talks to provider APIs directly and can use local computer tools when permissions allow. `DISCODE_PROVIDER` is always the active harness unless a user explicitly switches in settings. Account `priority` controls account ordering inside a provider, and `DISCODE_PROVIDER_PRIORITY` controls fallback order when usage limits are hit. Account `env` values and API keys are passed only to the native harness or child agent processes.
+Supported harnesses are `discode`, `codex`, `anthropic`, `zai`, `qwen`, `groq`, `opencode`, and `custom`. `discode` is the native harness: it talks to provider APIs directly and can use local computer tools when permissions allow. `DISCODE_PROVIDER` is always the active harness unless a user explicitly switches in settings. Account `priority` controls account ordering inside a provider, and `DISCODE_PROVIDER_PRIORITY` controls fallback order when usage limits are hit. Account `env` values and API keys are passed only to the native harness or child agent processes.
 
-Use the usage dashboard's `Add account` button to add Codex/OpenAI, Anthropic, OpenCode, Z.ai, Qwen, or custom accounts. The native Discode harness can use imported API credentials directly. OpenCode remains optional as an import source or fallback wrapper, not the default harness. API keys are stored in `data/accounts.json` with mode `0600` and injected only into Discode's native harness or child agent processes.
+Use the usage dashboard's `Add account` button to add Codex/OpenAI, Anthropic, Groq, OpenCode, Z.ai, Qwen, or custom accounts. The native Discode harness can use imported API credentials directly. OpenCode remains optional as an import source or fallback wrapper, not the default harness. For providers that expose an OpenAI-compatible API, add a `custom` account with the API key and base URL. API keys are stored in `data/accounts.json` with mode `0600` and injected only into Discode's native harness or child agent processes.
 
 If a configured provider CLI is missing from `PATH`, Discode shows an install-and-retry button when it knows the provider package.
 

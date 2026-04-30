@@ -178,7 +178,10 @@ export class CodexRunner {
     private async runPromptOnce(options: CodexRunOptions): Promise<CodexRunResult> {
         const provider = await this.getProvider(options.provider);
 
-        if (provider === 'discode') return this.runNativePromptOnce(options);
+        if (this.isNativeProvider(provider)) return this.runNativePromptOnce({
+            ...options,
+            provider
+        });
         if (provider !== 'codex') return this.runExternalPromptOnce(provider, options);
 
         const workspace = options.workspace || this.config.defaultWorkspace;
@@ -621,6 +624,7 @@ export class CodexRunner {
             || provider === 'anthropic'
             || provider === 'zai'
             || provider === 'qwen'
+            || provider === 'groq'
             || provider === 'custom';
     }
 
@@ -631,6 +635,7 @@ export class CodexRunner {
             || provider === 'anthropic'
             || provider === 'zai'
             || provider === 'qwen'
+            || provider === 'groq'
             || provider === 'custom';
     }
 
@@ -640,11 +645,17 @@ export class CodexRunner {
             || provider === 'anthropic'
             || provider === 'zai'
             || provider === 'qwen'
+            || provider === 'groq'
             || provider === 'custom') {
             return provider;
         }
 
         return null;
+    }
+
+    private isNativeProvider(provider: ProviderType): boolean {
+        return provider === 'discode'
+            || provider === 'groq';
     }
 }
 
@@ -802,6 +813,7 @@ function formatMissingExecutableMessage(provider: ProviderType, bin: string): st
 
 function providerInstall(provider: ProviderType): { command: string; label: string } | null {
     if (provider === 'discode') return null;
+    if (provider === 'groq') return null;
     if (provider === 'codex') return { command: 'bun add -g @openai/codex', label: 'Install Codex CLI' };
     if (provider === 'opencode') return { command: 'bun add -g opencode-ai', label: 'Install OpenCode CLI' };
     if (provider === 'anthropic') return { command: 'bun add -g @anthropic-ai/claude-code', label: 'Install Claude Code' };
@@ -818,6 +830,7 @@ function providerLabel(provider: ProviderType, bin: string): string {
     if (provider === 'anthropic') return 'Claude';
     if (provider === 'zai') return 'Z.ai';
     if (provider === 'qwen') return 'Qwen';
+    if (provider === 'groq') return 'Groq';
 
     return bin.split(/[\\/]/).pop() || 'Provider';
 }

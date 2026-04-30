@@ -260,7 +260,8 @@ const providerChoices: { label: string; value: ProviderType; description: string
     { label: 'Anthropic', value: 'anthropic', description: 'Use an Anthropic-compatible CLI.' },
     { label: 'Z.ai', value: 'zai', description: 'Use a Z.ai-compatible CLI.' },
     { label: 'Qwen', value: 'qwen', description: 'Use a Qwen-compatible CLI.' },
-    { label: 'Custom', value: 'custom', description: 'Use DISCODE_PROVIDER_COMMAND.' }
+    { label: 'Groq', value: 'groq', description: 'Use Groq through the native harness.' },
+    { label: 'Custom', value: 'custom', description: 'Use any OpenAI-compatible base URL or command.' }
 ];
 const accountProviderChoices = providerChoices
     .filter((choice): choice is { label: string; value: AccountProvider; description: string } => choice.value !== 'discode');
@@ -271,6 +272,7 @@ function isAccountProvider(value: unknown): value is AccountProvider {
         || value === 'anthropic'
         || value === 'zai'
         || value === 'qwen'
+        || value === 'groq'
         || value === 'custom';
 }
 const permissionChoices: { label: string; value: PermissionMode; description: string }[] = [
@@ -1302,18 +1304,21 @@ export class DiscordCodexBridge {
             const email = interaction.fields.getTextInputValue('email').trim();
             const priority = Number(interaction.fields.getTextInputValue('priority').trim());
             const command = interaction.fields.getTextInputValue('command').trim();
+            const commandIsBaseUrl = /^https?:\/\//i.test(command);
             const account = await this.accounts.addAccount({
                 name,
                 provider,
                 email,
                 priority: Number.isFinite(priority) ? priority : undefined,
-                command: command || undefined,
+                command: command && !commandIsBaseUrl ? command : undefined,
                 auth_mode: apiKey ? 'api_key' : 'login',
                 auth_data: apiKey ? {
                     api_key: apiKey,
-                    env_key: this.defaultApiKeyName(provider)
+                    env_key: this.defaultApiKeyName(provider),
+                    ...(commandIsBaseUrl ? { base_url: command } : {})
                 } : {
-                    type: 'login'
+                    type: 'login',
+                    ...(commandIsBaseUrl ? { base_url: command } : {})
                 }
             }, true);
 
@@ -2444,7 +2449,7 @@ export class DiscordCodexBridge {
                 new ActionRowBuilder<TextInputBuilder>().addComponents(
                     new TextInputBuilder()
                         .setCustomId('command')
-                        .setLabel('Command override')
+                        .setLabel(provider === 'custom' ? 'Base URL or command override' : 'Command override')
                         .setStyle(TextInputStyle.Short)
                         .setRequired(false)
                 )
@@ -3973,6 +3978,7 @@ export class DiscordCodexBridge {
         if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
         if (provider === 'zai') return 'ZAI_API_KEY';
         if (provider === 'qwen') return 'QWEN_API_KEY';
+        if (provider === 'groq') return 'GROQ_API_KEY';
 
         return 'OPENAI_API_KEY';
     }
