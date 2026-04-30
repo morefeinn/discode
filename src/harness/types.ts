@@ -16,6 +16,7 @@ export interface HarnessContext {
     env: Record<string, string>;
     workspace: string;
     toolsEnabled: boolean;
+    reasoningEffort?: string | null;
     depth: number;
     maxDepth: number;
     onEvent?: CodexEventHandler;

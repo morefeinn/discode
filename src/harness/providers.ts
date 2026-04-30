@@ -11,18 +11,18 @@ export async function runProviderTurn(context: HarnessContext, messages: any[], 
 }
 
 export async function resolveModel(backend: NativeBackend, requested: string | null | undefined, env: Record<string, string>): Promise<string> {
-    const direct = stripProviderPrefix(requested || '');
+    const direct = stripProviderPrefix(requested || '', backend);
 
     if (direct) return direct;
     const provider = backendToProviderType(backend);
     const models = await listAvailableModels(provider, false, env).catch(() => []);
     const model = models.find(item => item.value !== '__default__')?.value || '';
 
-    return stripProviderPrefix(model);
+    return stripProviderPrefix(model, backend);
 }
 
 export function selectBackend(model: string | null | undefined, accountProvider: AccountProvider | undefined, env: Record<string, string>): NativeBackend {
-    const prefix = (model || '').split('/')[0]?.toLowerCase();
+    const prefix = modelRoutePrefix(model);
 
     if (prefix === 'anthropic') return 'anthropic';
     if (prefix === 'z-ai' || prefix === 'zai') return 'zai';
@@ -51,18 +51,15 @@ export function backendToProviderType(backend: NativeBackend): ProviderType {
 }
 
 function runOpenAiTurn(context: HarnessContext, messages: any[], tools: any[]): Promise<ProviderTurnResult> {
+    const body = openAiRequestBody(context, messages, tools);
+
     return fetch(`${trimSlash(openAiBaseUrl(context))}/chat/completions`, {
         method: 'POST',
         headers: {
             authorization: `Bearer ${apiKey(context)}`,
             'content-type': 'application/json'
         },
-        body: JSON.stringify({
-            model: context.model,
-            messages,
-            tools: context.toolsEnabled ? tools : undefined,
-            tool_choice: context.toolsEnabled ? 'auto' : undefined
-        }),
+        body: JSON.stringify(body),
         signal: context.signal
     }).then(async response => {
         if (!response.ok) throw new Error(await responseError(response, context.backend));
@@ -236,17 +233,72 @@ function apiKey(context: HarnessContext): string {
     return key;
 }
 
-function stripProviderPrefix(value: string): string {
+function openAiRequestBody(context: HarnessContext, messages: any[], tools: any[]): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+        model: context.model,
+        messages,
+        tools: context.toolsEnabled ? tools : undefined,
+        tool_choice: context.toolsEnabled ? 'auto' : undefined
+    };
+
+    if (context.backend === 'groq') {
+        body.max_completion_tokens = Number(context.env.GROQ_MAX_COMPLETION_TOKENS || 1024);
+        const reasoningEffort = groqReasoningEffort(context.model, context.reasoningEffort);
+
+        if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+    }
+
+    return body;
+}
+
+function groqReasoningEffort(model: string, effort: string | null | undefined): string | null {
+    const normalized = model.toLowerCase();
+
+    if (normalized.includes('openai/gpt-oss-')) {
+        if (effort === 'low' || effort === 'medium' || effort === 'high') return effort;
+        if (effort === 'xhigh') return 'high';
+
+        return 'medium';
+    }
+    if (normalized.includes('qwen3') || normalized.includes('qwen/qwen3')) {
+        return effort === 'none' ? 'none' : 'default';
+    }
+
+    return null;
+}
+
+function modelRoutePrefix(value: string | null | undefined): string {
+    const normalized = (value || '').trim();
+
+    if (!normalized.includes(':')) return normalized.split('/')[0]?.toLowerCase() || '';
+
+    return normalized.split(':')[0]?.toLowerCase() || '';
+}
+
+function stripProviderPrefix(value: string, backend: NativeBackend): string {
     const normalized = value.trim();
 
     if (!normalized) return '';
-    const [prefix, ...rest] = normalized.split('/');
+    const [prefix, ...rest] = normalized.split(':');
 
-    if (rest.length > 0 && ['openai', 'anthropic', 'z-ai', 'zai', 'qwen', 'alibaba', 'groq', 'custom'].includes(prefix.toLowerCase())) {
-        return rest.join('/');
+    if (rest.length > 0 && providerPrefixMatchesBackend(prefix, backend)) {
+        return rest.join(':');
     }
 
     return normalized;
+}
+
+function providerPrefixMatchesBackend(prefix: string, backend: NativeBackend): boolean {
+    const normalized = prefix.toLowerCase();
+
+    if (backend === 'openai') return normalized === 'openai' || normalized === 'codex';
+    if (backend === 'anthropic') return normalized === 'anthropic';
+    if (backend === 'zai') return normalized === 'zai' || normalized === 'z-ai';
+    if (backend === 'qwen') return normalized === 'qwen' || normalized === 'alibaba';
+    if (backend === 'groq') return normalized === 'groq';
+    if (backend === 'custom') return normalized === 'custom';
+
+    return false;
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> {
