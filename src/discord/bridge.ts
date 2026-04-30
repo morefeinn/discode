@@ -41,7 +41,8 @@ import {
     getActiveProject,
     listProjects,
     saveProject,
-    setActiveProject
+    setActiveProject,
+    createManagedProject
 } from '../state/projects.js';
 import { addMcpServer, listMcpServers } from '../state/mcps.js';
 import {
@@ -79,6 +80,7 @@ import { listAvailableModels, ModelChoiceMetadata } from '../models/catalog.js';
 import { listRunningRuns, saveRun, updateRun, RunRecord } from '../state/runs.js';
 import { getTokenStats, recordTokenUsage } from '../state/tokenStats.js';
 import { getTranscript } from '../state/transcript.js';
+import { defaultWorkspacePath } from '../state/paths.js';
 import { recordUsageLimit } from '../state/usage.js';
 import {
     checkForUpdate,
@@ -1159,9 +1161,12 @@ export class DiscordCodexBridge {
         }
 
         if (interaction.customId === WORKSPACE_ADD_MODAL_ID || interaction.customId === `${WORKSPACE_ADD_MODAL_ID}:thread`) {
-            const workspace = this.expandHomePath(interaction.fields.getTextInputValue('workspace').trim());
-            const name = this.cleanProjectName(interaction.fields.getTextInputValue('name') || path.basename(workspace));
+            const requestedWorkspace = interaction.fields.getTextInputValue('workspace').trim();
+            const name = this.cleanProjectName(interaction.fields.getTextInputValue('name') || path.basename(requestedWorkspace) || 'Default');
             const model = interaction.fields.getTextInputValue('model').trim() || undefined;
+            const workspace = requestedWorkspace
+                ? this.expandHomePath(requestedWorkspace)
+                : defaultWorkspacePath(this.slugProjectName(name));
             const project = { name, workspace, model };
 
             await mkdir(workspace, { recursive: true });
@@ -1533,10 +1538,12 @@ export class DiscordCodexBridge {
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString()
             });
+            const modelForRun = options.model || conversation?.model || null;
+            const promptWithHistory = this.withSharedConversationHistory(prompt, conversation, options.fresh === true);
             const result = await this.runner.runPrompt({
-                prompt,
+                prompt: promptWithHistory,
                 workspace: options.workspace || conversation?.workspace,
-                model: options.model || conversation?.model,
+                model: modelForRun,
                 provider: options.provider,
                 permissionMode: options.permissionMode,
                 reasoningEffort: options.reasoningEffort,
@@ -1553,24 +1560,22 @@ export class DiscordCodexBridge {
                 }
             });
 
-            let savedConversation: ConversationRecord | null = null;
+            const savedConversation: ConversationRecord = {
+                discordChannelId: conversationKey,
+                discordGuildId: target.guildId || conversation?.discordGuildId || null,
+                discordThreadId: options.discordThreadId ?? conversation?.discordThreadId ?? null,
+                latestMessageId: conversation?.latestMessageId || null,
+                codexThreadId: result.threadId || conversation?.codexThreadId || `native:${conversationKey}`,
+                name: this.selectConversationName(conversation?.name, options.chatName, prompt),
+                requesterName: options.requesterName || conversation?.requesterName || null,
+                workspace: options.workspace || conversation?.workspace || this.config.defaultWorkspace,
+                model: modelForRun,
+                turns: this.nextConversationTurns(conversation?.turns || [], prompt, result, options.provider || null, modelForRun),
+                updatedAt: new Date().toISOString()
+            };
 
-            if (result.threadId) {
-                savedConversation = {
-                    discordChannelId: conversationKey,
-                    discordGuildId: target.guildId || conversation?.discordGuildId || null,
-                    discordThreadId: options.discordThreadId ?? conversation?.discordThreadId ?? null,
-                    latestMessageId: conversation?.latestMessageId || null,
-                    codexThreadId: result.threadId,
-                    name: this.selectConversationName(conversation?.name, options.chatName, prompt),
-                    requesterName: options.requesterName || conversation?.requesterName || null,
-                    workspace: options.workspace || conversation?.workspace || this.config.defaultWorkspace,
-                    model: options.model || conversation?.model || null,
-                    updatedAt: new Date().toISOString()
-                };
-                await saveConversation(savedConversation);
-                await this.renameThreadIfUseful(target, savedConversation.name);
-            }
+            await saveConversation(savedConversation);
+            await this.renameThreadIfUseful(target, savedConversation.name);
 
             await progress.flush();
             if (result.limitError) {
@@ -2171,7 +2176,7 @@ export class DiscordCodexBridge {
         });
         await message.reply(`Opened ${thread.url}`);
         const setupMessage = await thread.send({
-            content: `Choose the project for this conversation, then send the first prompt here.`,
+            content: `Choose a workspace for this conversation, or use the default Discode workspace, then send the first prompt here.`,
             components: await this.createThreadWorkspaceRows(project.workspace)
         });
         this.scheduleComponentExpiry(setupMessage, true);
@@ -2201,7 +2206,7 @@ export class DiscordCodexBridge {
         rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
                 .setCustomId(THREAD_WORKSPACE_ADD_BUTTON_ID)
-                .setLabel('Create workspace')
+                .setLabel('New managed workspace')
                 .setStyle(ButtonStyle.Primary)
         ));
 
@@ -3699,6 +3704,43 @@ export class DiscordCodexBridge {
         return footer.length > 0 ? `${text}\n\n-# ${footer.join(' | ')}` : text;
     }
 
+    private withSharedConversationHistory(prompt: string, conversation: ConversationRecord | null, fresh: boolean): string {
+        if (fresh || !conversation?.turns?.length) return prompt;
+        const history = conversation.turns.slice(-8)
+            .map(turn => `${turn.role.toUpperCase()}: ${turn.text.slice(0, 2500)}`)
+            .join('\n\n');
+
+        if (!history.trim()) return prompt;
+
+        return [
+            'Previous Discode conversation context, shared across harnesses:',
+            history,
+            '',
+            'Continue from that context and answer the new user request:',
+            prompt
+        ].join('\n');
+    }
+
+    private nextConversationTurns(turns: ConversationRecord['turns'], prompt: string, result: CodexRunResult, provider: string | null, model: string | null): ConversationRecord['turns'] {
+        return [
+            ...(turns || []),
+            {
+                role: 'user' as const,
+                text: prompt.slice(0, 12000),
+                provider,
+                model,
+                createdAt: new Date().toISOString()
+            },
+            {
+                role: 'assistant' as const,
+                text: (result.ok ? result.text : result.error || result.text || '').slice(0, 12000),
+                provider: result.provider || provider,
+                model: result.model || model,
+                createdAt: new Date().toISOString()
+            }
+        ].slice(-20);
+    }
+
     private async createRunControls(): Promise<ActionRowBuilder<ButtonBuilder>[]> {
         const settings = await getBridgeSettings();
         const model = getEffectiveModel(settings, this.config.defaultModel);
@@ -4045,7 +4087,7 @@ export class DiscordCodexBridge {
     private createWorkspaceModal(source: 'dashboard' | 'thread' = 'dashboard'): ModalBuilder {
         return new ModalBuilder()
             .setCustomId(source === 'thread' ? `${WORKSPACE_ADD_MODAL_ID}:thread` : WORKSPACE_ADD_MODAL_ID)
-            .setTitle(source === 'thread' ? 'Create workspace' : 'Add directory')
+            .setTitle(source === 'thread' ? 'Create workspace' : 'Add workspace')
             .addComponents(
                 new ActionRowBuilder<TextInputBuilder>().addComponents(
                     new TextInputBuilder()
@@ -4057,9 +4099,9 @@ export class DiscordCodexBridge {
                 new ActionRowBuilder<TextInputBuilder>().addComponents(
                     new TextInputBuilder()
                         .setCustomId('workspace')
-                        .setLabel('Directory path')
+                        .setLabel('Directory path, optional')
                         .setStyle(TextInputStyle.Short)
-                        .setRequired(true)
+                        .setRequired(false)
                 ),
                 new ActionRowBuilder<TextInputBuilder>().addComponents(
                     new TextInputBuilder()
@@ -4544,7 +4586,7 @@ export class DiscordCodexBridge {
         }
         const activeProject = await getActiveProject();
 
-        return activeProject || { workspace: this.config.defaultWorkspace, model: model || this.config.defaultModel };
+        return activeProject || await createManagedProject('Default', model || this.config.defaultModel);
     }
 
     private async resolveNaturalProject(request: string): Promise<{ workspace: string; model?: string | null } | null> {
@@ -4578,10 +4620,7 @@ export class DiscordCodexBridge {
 
         if (newProjectName) {
             const name = this.cleanProjectName(newProjectName);
-            const workspace = path.join(os.homedir(), 'DiscodeProjects', this.slugProjectName(name));
-
-            await mkdir(workspace, { recursive: true });
-            return saveProject({ name, workspace });
+            return createManagedProject(name);
         }
 
         return null;

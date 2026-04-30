@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { dataFile } from './paths.js';
 
 export interface UsageLimitRecord {
     accountId?: string | null;
@@ -13,7 +14,7 @@ interface UsageFile {
     limits: UsageLimitRecord[];
 }
 
-const dataPath = path.resolve('data', 'usage.json');
+const dataPath = dataFile('usage.json');
 
 async function readStore(): Promise<UsageFile> {
     try {

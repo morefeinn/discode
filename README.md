@@ -43,6 +43,8 @@ Useful optional flags:
 - `--install-deps`: install missing checked dependencies in headless mode
 - `--import-credentials`: import credentials found in `.env`, Codex auth, or OpenCode auth during setup
 - `--workspace <path>`
+- `--data-dir <path>`
+- `--workspaces-dir <path>`
 - `--provider discode|codex|anthropic|zai|qwen|groq|opencode|custom`
 - `--provider-command <command>`
 - `--permission full|directory|auto-review`
@@ -109,7 +111,7 @@ When a conversation is already running, Discode offers `Steer now` to interrupt 
 
 ## Accounts
 
-Discode stores accounts in `data/accounts.json` unless `DISCODE_ACCOUNTS_PATH` is set. The file is local state and is ignored by git.
+Discode stores accounts, settings, model cache, usage, projects, and conversation history in its app data folder. By default that is `~/.discode`; set `DISCODE_DATA_DIR` to move it. Managed workspaces live under `~/.discode/workspaces` unless `DISCODE_WORKSPACES_DIR` is set. Existing repo-local `data/*.json` files are copied into the app data folder on first use so older installs keep their state.
 
 During setup, or later with `discode credentials import`, Discode can copy usable credentials from the local `.env`, `~/.codex/auth.json`, and OpenCode auth files such as `~/.local/share/opencode/auth.json`. After import, Discode uses its own account store and load balancer; it does not depend on codex-switcher.
 
@@ -145,7 +147,7 @@ During setup, or later with `discode credentials import`, Discode can copy usabl
 
 Supported harnesses are `discode`, `codex`, `anthropic`, `zai`, `qwen`, `groq`, `opencode`, and `custom`. `discode` is the native harness: it talks to provider APIs directly and can use local computer tools when permissions allow. `DISCODE_PROVIDER` is always the active harness unless a user explicitly switches in settings. Account `priority` controls account ordering inside a provider, and `DISCODE_PROVIDER_PRIORITY` controls fallback order when usage limits are hit. Account `env` values and API keys are passed only to the native harness or child agent processes.
 
-Use the usage dashboard's `Add account` button to add Codex/OpenAI, Anthropic, Groq, OpenCode, Z.ai, Qwen, or custom accounts. The native Discode harness can use imported API credentials directly. OpenCode remains optional as an import source or fallback wrapper, not the default harness. For providers that expose an OpenAI-compatible API, add a `custom` account with the API key and base URL. API keys are stored in `data/accounts.json` with mode `0600` and injected only into Discode's native harness or child agent processes.
+Use the usage dashboard's `Add account` button to add Codex/OpenAI, Anthropic, Groq, OpenCode, Z.ai, Qwen, or custom accounts. The native Discode harness can use imported API credentials directly. OpenCode remains optional as an import source or fallback wrapper, not the default harness. For providers that expose an OpenAI-compatible API, add a `custom` account with the API key and base URL. API keys are stored in the app data account file with mode `0600` and injected only into Discode's native harness or child agent processes.
 
 If a configured provider CLI is missing from `PATH`, Discode shows an install-and-retry button when it knows the provider package.
 
@@ -161,6 +163,8 @@ Rust backends are supported as custom provider binaries through `DISCODE_PROVIDE
 
 - provider routing and live model resolution (`src/harness/providers.ts`)
 - tool execution (`src/harness/tools.ts`)
+- workspace file tools (`list_directory`, `read_file`, `write_file`, `edit_file`, `delete_file`, `grep`, `apply_patch`)
+- terminal execution (`execute_shell`)
 - recursive subagents (`spawn_subagent`)
 - TCP socket sessions (`socket_open`, `socket_write`, `socket_close`)
 - persistent local processes (`process_start`, `process_write`, `process_read`, `process_stop`)

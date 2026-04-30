@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { dataFile, defaultWorkspacePath, slugName } from './paths.js';
 
 export interface ProjectRecord {
     name: string;
@@ -14,7 +15,7 @@ interface ProjectFile {
     projects: Record<string, ProjectRecord>;
 }
 
-const dataPath = path.resolve('data', 'projects.json');
+const dataPath = dataFile('projects.json');
 
 async function readStore(): Promise<ProjectFile> {
     try {
@@ -48,7 +49,7 @@ export async function saveProject(project: Omit<ProjectRecord, 'updatedAt'>): Pr
 }
 
 export async function listProjects(): Promise<{ activeProjectName?: string | null; projects: ProjectRecord[] }> {
-    const store = await readStore();
+    const store = await ensureDefaultProject(await readStore());
 
     return {
         activeProjectName: store.activeProjectName,
@@ -57,7 +58,7 @@ export async function listProjects(): Promise<{ activeProjectName?: string | nul
 }
 
 export async function getActiveProject(): Promise<ProjectRecord | null> {
-    const store = await readStore();
+    const store = await ensureDefaultProject(await readStore());
 
     if (!store.activeProjectName) return null;
 
@@ -66,7 +67,7 @@ export async function getActiveProject(): Promise<ProjectRecord | null> {
 
 export async function findProject(query: string): Promise<ProjectRecord | null> {
     const normalized = normalizeName(query);
-    const store = await readStore();
+    const store = await ensureDefaultProject(await readStore());
     const projects = Object.values(store.projects);
     const index = Number(normalized);
 
@@ -80,7 +81,7 @@ export async function findProject(query: string): Promise<ProjectRecord | null> 
 }
 
 export async function setActiveProject(query: string): Promise<ProjectRecord> {
-    const store = await readStore();
+    const store = await ensureDefaultProject(await readStore());
     const project = await findProject(query);
 
     if (!project) throw new Error(`No project matched "${query}".`);
@@ -88,4 +89,34 @@ export async function setActiveProject(query: string): Promise<ProjectRecord> {
     await writeStore(store);
 
     return project;
+}
+
+export async function createManagedProject(name: string, model?: string | null): Promise<ProjectRecord> {
+    const cleanName = name.trim() || 'Default';
+    const workspace = defaultWorkspacePath(slugName(cleanName));
+
+    await mkdir(workspace, { recursive: true });
+
+    return saveProject({
+        name: cleanName,
+        workspace,
+        model
+    });
+}
+
+async function ensureDefaultProject(store: ProjectFile): Promise<ProjectFile> {
+    if (Object.keys(store.projects || {}).length > 0) return store;
+    const workspace = defaultWorkspacePath('default');
+    const record: ProjectRecord = {
+        name: 'Default',
+        workspace,
+        updatedAt: new Date().toISOString()
+    };
+
+    await mkdir(workspace, { recursive: true });
+    store.projects[normalizeName(record.name)] = record;
+    store.activeProjectName = normalizeName(record.name);
+    await writeStore(store);
+
+    return store;
 }

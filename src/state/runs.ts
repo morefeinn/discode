@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { dataFile } from './paths.js';
 
 export interface RunRecord {
     id: string;
@@ -31,7 +32,7 @@ interface RunFile {
     runs: Record<string, RunRecord>;
 }
 
-const dataPath = path.resolve('data', 'runs.json');
+const dataPath = dataFile('runs.json');
 
 async function readStore(): Promise<RunFile> {
     try {

@@ -152,7 +152,7 @@ export function appendToolResults(context: HarnessContext, messages: any[], tool
 
 export function systemPrompt(context: HarnessContext): string {
     const toolText = context.toolsEnabled
-        ? 'You may use native tools: execute_shell, spawn_subagent, socket_open, socket_write, socket_close, process_start, process_write, process_read, and process_stop.'
+        ? 'You may use native tools: list_directory, read_file, write_file, edit_file, delete_file, grep, apply_patch, execute_shell, spawn_subagent, socket_open, socket_write, socket_close, process_start, process_write, process_read, and process_stop. For coding tasks, inspect files first, edit or create files with tools, then run a verification command when possible.'
         : 'No native tools are available in this permission mode. Answer without running commands.';
 
     return [

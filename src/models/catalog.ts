@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ProviderType } from '../state/settings.js';
+import { dataFile } from '../state/paths.js';
 
 export interface ModelChoiceMetadata {
     name: string;
@@ -32,7 +33,7 @@ interface ModelsDevProvider {
 
 type ModelEnv = Record<string, string | undefined>;
 
-const cachePath = path.resolve('data', 'models-dev-cache.json');
+const cachePath = dataFile('models-dev-cache.json');
 const cacheTtlMs = 24 * 60 * 60 * 1000;
 const modelsUrl = process.env.DISCODE_MODELS_URL?.trim() || 'https://models.dev/api.json';
 

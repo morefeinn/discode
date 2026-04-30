@@ -372,6 +372,8 @@ async function setup() {
             : technical || ['y', 'yes'].includes((await rl.question(promptText('Configure runtime options now? [y/N]: '))).trim().toLowerCase());
 
         values.DISCODE_COMMAND_NAME = flagValue('command-name') || existing.DISCODE_COMMAND_NAME || '';
+        values.DISCODE_DATA_DIR = flagValue('data-dir') || existing.DISCODE_DATA_DIR || '';
+        values.DISCODE_WORKSPACES_DIR = flagValue('workspaces-dir') || existing.DISCODE_WORKSPACES_DIR || '';
         values.DEFAULT_WORKSPACE = flagValue('workspace') || existing.DEFAULT_WORKSPACE || '';
         values.DEFAULT_SANDBOX = flagValue('sandbox') || existing.DEFAULT_SANDBOX || 'workspace-write';
         values.DEFAULT_MODEL = flagValue('model') || existing.DEFAULT_MODEL || '';
@@ -396,7 +398,9 @@ async function setup() {
         if (configureRuntime) {
             title('Harness runtime');
             values.DISCODE_COMMAND_NAME = await setupValue(rl, { label: 'Slash command name override', flag: 'command-name', current: existing.DISCODE_COMMAND_NAME, headless });
-            values.DEFAULT_WORKSPACE = await setupValue(rl, { label: 'Initial workspace', flag: 'workspace', current: existing.DEFAULT_WORKSPACE, fallback: process.cwd(), headless });
+            values.DISCODE_DATA_DIR = await setupValue(rl, { label: 'Discode app data folder, blank uses ~/.discode', flag: 'data-dir', current: existing.DISCODE_DATA_DIR, headless });
+            values.DISCODE_WORKSPACES_DIR = await setupValue(rl, { label: 'Managed workspaces folder, blank uses app data', flag: 'workspaces-dir', current: existing.DISCODE_WORKSPACES_DIR, headless });
+            values.DEFAULT_WORKSPACE = await setupValue(rl, { label: 'Default workspace path, optional', flag: 'workspace', current: existing.DEFAULT_WORKSPACE, headless });
             values.DEFAULT_MODEL = await setupValue(rl, { label: 'Model override, blank uses provider default', flag: 'model', current: existing.DEFAULT_MODEL, headless });
             values.DISCODE_MODEL_CHOICES = await setupValue(rl, { label: 'Extra model ids, comma separated', flag: 'models', current: existing.DISCODE_MODEL_CHOICES, headless });
             values.DISCODE_PROVIDER = await setupValue(rl, { label: 'Active provider discode/codex/anthropic/zai/qwen/groq/opencode/custom', flag: 'provider', current: existing.DISCODE_PROVIDER, fallback: 'discode', headless });

@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { CodexUsage } from '../codex/runner.js';
+import { dataFile } from './paths.js';
 
 export interface TokenStatsRecord extends CodexUsage {
     conversationKey: string;
@@ -12,7 +13,7 @@ interface TokenStatsFile {
     conversations: Record<string, TokenStatsRecord>;
 }
 
-const dataPath = path.resolve('data', 'token-stats.json');
+const dataPath = dataFile('token-stats.json');
 
 async function readStore(): Promise<TokenStatsFile> {
     try {

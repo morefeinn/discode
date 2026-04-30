@@ -2,6 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_PROVIDER_PRIORITY, ProviderType, isProviderType } from './state/settings.js';
+import { dataFile, defaultWorkspacePath } from './state/paths.js';
 
 export interface BridgeConfig {
     token: string;
@@ -96,7 +97,7 @@ export function loadConfig(): BridgeConfig {
         allowedUserIds,
         primaryAllowedUserId,
         commandName: process.env.DISCODE_COMMAND_NAME?.trim() || null,
-        defaultWorkspace: process.env.DEFAULT_WORKSPACE?.trim() || process.cwd(),
+        defaultWorkspace: process.env.DEFAULT_WORKSPACE?.trim() || defaultWorkspacePath('default'),
         defaultSandbox: process.env.DEFAULT_SANDBOX?.trim() || 'workspace-write',
         defaultModel: process.env.DEFAULT_MODEL?.trim() || null,
         defaultProvider: process.env.DISCODE_PROVIDER?.trim() || process.env.DEFAULT_PROVIDER?.trim() || 'discode',
@@ -111,7 +112,7 @@ export function loadConfig(): BridgeConfig {
         providerCommand: process.env.DISCODE_PROVIDER_COMMAND?.trim() || null,
         runTimeoutMs: readNumber('CODEX_TIMEOUT_MS', 30 * 60 * 1000),
         autoSwitchOnLimit: readBoolean('AUTO_SWITCH_ON_LIMIT', true),
-        accountsPath: process.env.DISCODE_ACCOUNTS_PATH?.trim() || path.join(process.cwd(), 'data', 'accounts.json'),
+        accountsPath: process.env.DISCODE_ACCOUNTS_PATH?.trim() || dataFile('accounts.json'),
         codexAuthPath: process.env.CODEX_AUTH_PATH?.trim() || path.join(os.homedir(), '.codex', 'auth.json'),
         extensionRobloxApiKey: process.env.DISCODE_EXTENSION_ROBLOX_API_KEY?.trim()
             || process.env.ROBLOX_API_KEY?.trim()

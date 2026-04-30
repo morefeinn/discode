@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { dataFile } from './paths.js';
 
 export interface ConversationRecord {
     discordChannelId: string;
@@ -11,14 +12,23 @@ export interface ConversationRecord {
     requesterName?: string | null;
     workspace: string;
     model?: string | null;
+    turns?: ConversationTurn[];
     updatedAt: string;
+}
+
+export interface ConversationTurn {
+    role: 'user' | 'assistant';
+    text: string;
+    provider?: string | null;
+    model?: string | null;
+    createdAt: string;
 }
 
 interface ConversationFile {
     conversations: Record<string, ConversationRecord>;
 }
 
-const dataPath = path.resolve('data', 'conversations.json');
+const dataPath = dataFile('conversations.json');
 
 async function readStore(): Promise<ConversationFile> {
     try {

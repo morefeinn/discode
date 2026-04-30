@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { dataFile } from './paths.js';
 
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
 export type ProviderType = 'discode' | 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'groq' | 'custom';
@@ -40,7 +41,7 @@ interface SettingsFile {
     settings: BridgeSettings;
 }
 
-const dataPath = path.resolve('data', 'settings.json');
+const dataPath = dataFile('settings.json');
 export const DEFAULT_MODEL_CHOICE = '__default__';
 export const DEFAULT_PROVIDER_PRIORITY: ProviderType[] = ['discode', 'codex', 'anthropic', 'zai', 'qwen', 'groq', 'opencode', 'custom'];
 export const DEFAULT_AGENT_NAMES = [
