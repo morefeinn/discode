@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import { Client, Events, GatewayIntentBits, MessageFlags, Partials } from 'discord.js';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { loadConfig } from './config.js';
 import { CodexRunner } from './codex/runner.js';
 import { AccountRouter } from './accounts/router.js';
@@ -41,12 +43,13 @@ const client = new Client({
 
 client.once(Events.ClientReady, async () => {
     const botName = client.user?.username || 'Discode';
-    ok(`Connected as ${client.user?.tag}`);
 
     try {
         const registered = await registerSlashCommands(config, botName, [...client.guilds.cache.keys()]);
         bridge.setBotIdentity(botName, registered.primaryName);
-        ok(`Slash commands ready: ${registered.names.join(', ')}`);
+        ok(`gateway connected as ${client.user?.tag}`);
+        info(`providers ${await providerSummary()}`);
+        info(`usage ${formatNumber(readStoredTokenUsage())} tokens`);
         const updateStatus = await checkForUpdate(process.cwd());
         const updateNotice = formatUpdateNotice(updateStatus);
 
@@ -56,6 +59,33 @@ client.once(Events.ClientReady, async () => {
         console.error('Failed to register slash commands:', error);
     }
 });
+
+async function providerSummary(): Promise<string> {
+    const accountProviders = (await accounts.listAccounts())
+        .map(account => account.provider)
+        .filter(Boolean);
+    const providers = Array.from(new Set([
+        config.defaultProvider,
+        ...accountProviders
+    ])).filter(Boolean);
+
+    return providers.join(', ') || 'codex';
+}
+
+function readStoredTokenUsage(): number {
+    try {
+        const parsed = JSON.parse(readFileSync(path.resolve('data', 'token-stats.json'), 'utf8'));
+        const conversations = Object.values(parsed?.conversations || {}) as { totalTokens?: number }[];
+
+        return conversations.reduce((sum, item) => sum + (item.totalTokens || 0), 0);
+    } catch {
+        return 0;
+    }
+}
+
+function formatNumber(value: number): string {
+    return value.toLocaleString('en-US');
+}
 
 client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isAutocomplete()) {

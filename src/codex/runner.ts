@@ -484,23 +484,31 @@ export class CodexRunner {
         const accountEnv = await this.accounts.getActiveEnvironment();
         const command = await this.getProviderCommand(provider, options);
         const code = await new Promise<number>(resolve => {
-            const child = spawn(command.bin, command.args, {
-                cwd: workspace,
-                env: {
-                    ...process.env,
-                    ...accountEnv,
-                    ...(this.config.extensionRobloxApiKey ? { ROBLOX_API_KEY: this.config.extensionRobloxApiKey } : {}),
-                    ...(this.config.extensionRobloxUniverseId ? { ROBLOX_UNIVERSE_ID: this.config.extensionRobloxUniverseId } : {}),
-                    ...(this.config.extensionRobloxPlaceId ? { ROBLOX_PLACE_ID: this.config.extensionRobloxPlaceId } : {}),
-                    DISCODE_PROMPT: options.prompt || '',
-                    DISCODE_WORKSPACE: workspace,
-                    DISCODE_MODEL: options.model || '',
-                    DISCODE_REASONING: options.reasoningEffort || '',
-                    DISCODE_PERMISSION_MODE: options.permissionMode || '',
-                    NO_COLOR: '1'
-                },
-                stdio: ['pipe', 'pipe', 'pipe']
-            });
+            let child;
+
+            try {
+                child = spawn(command.bin, command.args, {
+                    cwd: workspace,
+                    env: {
+                        ...process.env,
+                        ...accountEnv,
+                        ...(this.config.extensionRobloxApiKey ? { ROBLOX_API_KEY: this.config.extensionRobloxApiKey } : {}),
+                        ...(this.config.extensionRobloxUniverseId ? { ROBLOX_UNIVERSE_ID: this.config.extensionRobloxUniverseId } : {}),
+                        ...(this.config.extensionRobloxPlaceId ? { ROBLOX_PLACE_ID: this.config.extensionRobloxPlaceId } : {}),
+                        DISCODE_PROMPT: options.prompt || '',
+                        DISCODE_WORKSPACE: workspace,
+                        DISCODE_MODEL: options.model || '',
+                        DISCODE_REASONING: options.reasoningEffort || '',
+                        DISCODE_PERMISSION_MODE: options.permissionMode || '',
+                        NO_COLOR: '1'
+                    },
+                    stdio: ['pipe', 'pipe', 'pipe']
+                });
+            } catch (error) {
+                stderr += formatSpawnError(provider, command.bin, error);
+                resolve(1);
+                return;
+            }
             const timeout = setTimeout(() => {
                 child.kill('SIGTERM');
             }, this.config.runTimeoutMs);
@@ -521,13 +529,7 @@ export class CodexRunner {
             child.on('error', error => {
                 clearTimeout(timeout);
                 options.signal?.removeEventListener('abort', abort);
-                const missing = missingExecutableError(error, command.bin);
-
-                if (missing) {
-                    stderr += formatMissingExecutableMessage(provider, command.bin);
-                } else {
-                    stderr += String(error);
-                }
+                stderr += formatSpawnError(provider, command.bin, error);
                 resolve(1);
             });
             child.on('close', exitCode => {
@@ -554,13 +556,13 @@ export class CodexRunner {
     }
 
     private async getProvider(provider: ProviderType | undefined): Promise<ProviderType> {
+        if (this.isProviderType(provider)) return provider;
         const accountProvider = await this.accounts.getActiveProvider();
 
-        if (this.isAccountProvider(accountProvider) && (!provider || provider === this.config.defaultProvider)) {
+        if (this.isAccountProvider(accountProvider)) {
             return accountProvider;
         }
 
-        if (this.isProviderType(provider)) return provider;
         if (this.isProviderType(this.config.defaultProvider)) return this.config.defaultProvider;
 
         return 'codex';
@@ -758,7 +760,7 @@ function looksLikeLimit(text: string): boolean {
 function missingExecutableError(error: unknown, bin: string): boolean {
     const code = typeof error === 'object' && error ? (error as { code?: unknown }).code : null;
 
-    return code === 'ENOENT' || executableMissingFromText(String(error), bin);
+    return code === 'ENOENT' || code === 'ENOEXEC' || executableMissingFromText(String(error), bin);
 }
 
 function executableMissingFromText(text: string, bin: string): boolean {
@@ -766,6 +768,10 @@ function executableMissingFromText(text: string, bin: string): boolean {
     const escaped = executable.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
     return new RegExp(`\\bENOENT\\b|not found.*${escaped}|${escaped}.*not found|executable not found`, 'i').test(text);
+}
+
+function formatSpawnError(provider: ProviderType, bin: string, error: unknown): string {
+    return missingExecutableError(error, bin) ? formatMissingExecutableMessage(provider, bin) : String(error);
 }
 
 function formatMissingExecutableMessage(provider: ProviderType, bin: string): string {

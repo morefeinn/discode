@@ -1182,7 +1182,7 @@ export class DiscordCodexBridge {
         activeRuns.add(conversationKey);
         const controller = new AbortController();
         activeRunControllers.set(conversationKey, controller);
-        const progress = this.createProgressUpdater(target);
+        const progress = this.createProgressUpdater(target, prompt);
         const runId = options.runId || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
         try {
@@ -1351,7 +1351,7 @@ export class DiscordCodexBridge {
         }
 
         activeRuns.add(conversationKey);
-        const progress = this.createProgressUpdater(target);
+        const progress = this.createProgressUpdater(target, options.instructions || 'review');
 
         try {
             progress.push('Starting review');
@@ -2685,7 +2685,7 @@ export class DiscordCodexBridge {
         return `${shortened}${line ? `:${line}` : ''}${suffix}`;
     }
 
-    private createProgressUpdater(target: ResponseTarget): { push: (label: string, text?: string) => void; flush: () => Promise<void> } {
+    private createProgressUpdater(target: ResponseTarget, agentContext = ''): { push: (label: string, text?: string) => void; flush: () => Promise<void> } {
         const lines: string[] = [];
         let idleLabel: string | null = null;
         let idleIndex = 0;
@@ -2703,7 +2703,7 @@ export class DiscordCodexBridge {
 
             if (now - lastUpdate < 2500) return;
             lastUpdate = now;
-            const file = new AttachmentBuilder(await renderThinkingGif(render(), this.botName, await this.createAgentRoster(render())), { name: `${this.commandName}-thinking.gif` });
+            const file = new AttachmentBuilder(await renderThinkingGif(render(), this.botName, await this.createAgentRoster(agentContext)), { name: `${this.commandName}-thinking.gif` });
             const payload = {
                 content: '',
                 embeds: [],
@@ -2742,22 +2742,29 @@ export class DiscordCodexBridge {
     }
 
     private async createAgentRoster(task: string): Promise<AgentStatus[]> {
+        if (!this.isSubagentRequest(task)) return [];
         const settings = await getBridgeSettings();
         const names = getEffectiveAgentNames(settings);
         const normalized = task.toLowerCase();
         const roles = [
-            { role: 'General', active: true },
+            { role: 'General', active: /\b(general|sub-?agents?|parallel agents?)\b/i.test(normalized) },
             { role: 'Explore', active: /\b(inspect|search|read|files?|workspace|directory|project|explor)/i.test(normalized) },
             { role: 'Review', active: /\b(review|test|check|verify|bug|failure|fix)\b/i.test(normalized) },
             { role: 'Implement', active: /\b(edit|build|implement|create|update|write|patch)\b/i.test(normalized) }
         ];
 
-        return roles.map((item, index) => ({
-            name: names[index % names.length] || `Agent ${index + 1}`,
-            role: item.role,
-            color: AGENT_COLORS[index % AGENT_COLORS.length],
-            active: item.active
-        }));
+        return roles
+            .filter(item => item.active)
+            .map((item, index) => ({
+                name: names[index % names.length] || `Agent ${index + 1}`,
+                role: item.role,
+                color: AGENT_COLORS[index % AGENT_COLORS.length],
+                active: true
+            }));
+    }
+
+    private isSubagentRequest(value: string): boolean {
+        return /\b(sub-?agents?|explore agents?|general agents?|parallel agents?|delegate|spawn agents?)\b/i.test(value);
     }
 
     private withFooter(text: string, result: CodexRunResult): string {

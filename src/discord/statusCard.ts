@@ -19,8 +19,7 @@ const THINKING_FRAME_DELAY_MS = 48;
 
 export async function renderThinkingGif(task: string, agentName: string, agents: AgentStatus[] = []): Promise<Buffer> {
     const { applyPalette, GIFEncoder, quantize } = await import('gifenc');
-    const roster = agents.length > 0 ? agents : [{ name: cleanAgentName(agentName), role: 'General', color: '#8b5cf6', active: true }];
-    const frames = await Promise.all(Array.from({ length: THINKING_FRAMES }, (_value, index) => renderRaw(renderThinkingSvg(task, cleanAgentName(agentName), roster, index), WIDTH, HEIGHT)));
+    const frames = await Promise.all(Array.from({ length: THINKING_FRAMES }, (_value, index) => renderRaw(renderThinkingSvg(task, cleanAgentName(agentName), agents, index), WIDTH, HEIGHT)));
     const gif = GIFEncoder();
 
     for (const frame of frames) {

@@ -158,7 +158,7 @@ function installCommand(name) {
 
 async function checkDependencies(rl, headless) {
     const required = ['bun'];
-    const recommended = ['git', 'codex'];
+    const recommended = ['git'];
     const missingRequired = required.filter(name => !commandExists(name));
     const missingRecommended = recommended.filter(name => !commandExists(name));
 
@@ -403,8 +403,6 @@ async function setup() {
 
 function startForeground() {
     stopExistingInstances();
-    title('Starting Discode');
-    note('Press Ctrl+C to stop the foreground process.');
     const child = spawn(resolveRuntime(), [path.join(rootDir, 'src/index.ts')], {
         cwd: rootDir,
         env: getRuntimeEnv(),
