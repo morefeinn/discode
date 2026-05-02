@@ -94,7 +94,7 @@ export class CodexRunner {
         const provider = await this.getProvider(options.provider);
         const accountScope = this.getAccountScope(provider);
         const limitedAccount = await this.accounts.getActiveAccount(accountScope);
-        const nextAccount = await this.accounts.switchToNext(accountScope);
+        const nextAccount = provider === 'codex' ? await this.accounts.switchToNext(accountScope) : null;
 
         if (nextAccount && nextAccount.id !== limitedAccount?.id) {
             const retryResult = await run();
@@ -148,8 +148,8 @@ export class CodexRunner {
                 provider
             });
 
-            retryResult.limitError = firstResult.error || firstResult.text;
             if (retryResult.ok || !looksLikeLimit(retryResult.error || retryResult.text || '')) {
+                retryResult.limitError = firstResult.error || firstResult.text;
                 retryResult.switchedAccountName = `${provider} fallback`;
                 return retryResult;
             }

@@ -75,7 +75,7 @@ function renderSvg(settings: BridgeSettings, config: BridgeConfig, page: Setting
                     row('Final responses', finalResponsesAsImages ? 'Images' : 'Text', 166),
                     row('Agent names', agentNaming === 'Custom' ? `${customAgentCount} custom` : 'Greek roster', 246),
                     row('Token stats', 'Available from response controls', 326),
-                    row('Button expiry', 'Disabled after 60 seconds', 406),
+                    row('Button expiry', 'Disabled after 5 minutes', 406),
                     row('Slash responses', slashResponsesEphemeral ? 'Ephemeral' : 'Public', 486)
                     ]
                     : page === 'failover'

@@ -39,6 +39,9 @@ export interface UsageOverviewData {
     title: string;
     accounts: UsageOverviewAccount[];
     providers: UsageOverviewProvider[];
+    totalAccounts?: number;
+    activeName?: string | null;
+    pageLabel?: string;
     generatedAt: string;
 }
 
@@ -75,17 +78,18 @@ function renderSvg(data: UsageCardData): string {
 }
 
 function renderOverviewSvg(data: UsageOverviewData): string {
-    const totalAccounts = data.accounts.length;
+    const totalAccounts = data.totalAccounts ?? data.accounts.length;
     const active = data.accounts.find(account => account.active);
+    const activeName = data.activeName || active?.name || 'none';
     const accounts = data.accounts.slice(0, 8);
     const providers = data.providers.slice(0, 5);
 
     return [
         `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${OVERVIEW_HEIGHT}" viewBox="0 0 ${WIDTH} ${OVERVIEW_HEIGHT}">`,
         `<rect x="1" y="1" width="${WIDTH - 2}" height="${OVERVIEW_HEIGHT - 2}" rx="34" fill="#202123" stroke="#343541" stroke-width="2"/>`,
-        text('Overview', 1112, 74, 22, 240, '#8e8ea0', 600, 'end'),
+        text(data.pageLabel || 'Overview', 1112, 74, 22, 240, '#8e8ea0', 600, 'end'),
         text(data.title, 88, 112, 42, 440, '#f7f7f8', 780),
-        text(`${totalAccounts} account${totalAccounts === 1 ? '' : 's'} · Active ${active?.name || 'none'}`, 88, 164, 22, 760, '#8e8ea0', 540),
+        text(`${totalAccounts} account${totalAccounts === 1 ? '' : 's'} · Active ${activeName}`, 88, 164, 22, 760, '#8e8ea0', 540),
         text('Provider usage limits', 88, 238, 28, 420, '#f7f7f8', 740),
         ...providers.map((provider, index) => overviewRow(provider.name, `${provider.accountCount} account${provider.accountCount === 1 ? '' : 's'}`, provider.remainingPercent, 88, 292 + index * 82, 456)),
         text('Account split', 664, 238, 28, 320, '#f7f7f8', 740),

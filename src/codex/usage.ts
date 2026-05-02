@@ -127,13 +127,14 @@ async function fetchCommandUsage(account: DiscodeAccount): Promise<AccountUsage>
 function parseUsagePayload(text: string): AccountUsage | null {
     try {
         const payload = JSON.parse(text);
+        const explicitWindows = normalizeExplicitWindows(payload);
 
         return {
             ok: payload.ok ?? true,
             error: payload.error,
             planType: payload.planType || payload.plan_type || null,
-            primaryWindow: normalizeWindow(payload.primaryWindow || payload.primary_window || payload.rate_limit?.primary_window),
-            secondaryWindow: normalizeWindow(payload.secondaryWindow || payload.secondary_window || payload.rate_limit?.secondary_window),
+            primaryWindow: explicitWindows.primaryWindow ?? normalizeWindow(payload.primaryWindow || payload.primary_window || payload.rate_limit?.primary_window),
+            secondaryWindow: explicitWindows.secondaryWindow ?? normalizeWindow(payload.secondaryWindow || payload.secondary_window || payload.rate_limit?.secondary_window),
             hasCredits: payload.hasCredits ?? payload.has_credits ?? null,
             unlimitedCredits: payload.unlimitedCredits ?? payload.unlimited_credits ?? payload.credits?.unlimited ?? null,
             creditsBalance: payload.creditsBalance || payload.credits_balance || payload.credits?.balance || null
@@ -159,17 +160,19 @@ function getStaticUsage(account: DiscodeAccount): AccountUsage | null {
         || stringValue((authData as any).credits?.balance);
     const remainingPercent = numberValue((account as any).remaining_percent)
         ?? numberValue((authData as any).remaining_percent);
+    const explicitWindows = normalizeExplicitWindows({ ...authData, ...account });
 
-    if (!creditsBalance && remainingPercent === null) return null;
+    if (!creditsBalance && remainingPercent === null && !explicitWindows.primaryWindow && !explicitWindows.secondaryWindow) return null;
 
     return {
         ok: true,
         planType: account.plan_type || null,
-        primaryWindow: remainingPercent === null ? null : {
+        primaryWindow: explicitWindows.primaryWindow ?? (remainingPercent === null ? null : {
             usedPercent: 100 - remainingPercent,
             windowSeconds: null,
             resetAt: null
-        },
+        }),
+        secondaryWindow: explicitWindows.secondaryWindow ?? null,
         creditsBalance: creditsBalance || null
     };
 }
@@ -221,6 +224,40 @@ function normalizeWindow(value: any): UsageWindow | null {
     };
 }
 
+function normalizeExplicitWindows(value: any): { primaryWindow: UsageWindow | null; secondaryWindow: UsageWindow | null } {
+    if (!value || typeof value !== 'object') {
+        return { primaryWindow: null, secondaryWindow: null };
+    }
+    const regularRemaining = numberValue(value.regular_remaining_percent)
+        ?? numberValue(value.primary_remaining_percent)
+        ?? numberValue(value.remainingPercent)
+        ?? numberValue(value.remaining_percent);
+    const regularUsed = numberValue(value.regular_used_percent)
+        ?? numberValue(value.primary_used_percent)
+        ?? numberValue(value.usedPercent)
+        ?? numberValue(value.used_percent);
+    const weeklyRemaining = numberValue(value.weekly_remaining_percent)
+        ?? numberValue(value.secondary_remaining_percent);
+    const weeklyUsed = numberValue(value.weekly_used_percent)
+        ?? numberValue(value.secondary_used_percent);
+    const primaryWindow = regularRemaining !== null || regularUsed !== null
+        ? {
+            usedPercent: regularUsed ?? (regularRemaining === null ? null : 100 - regularRemaining),
+            windowSeconds: finiteNumberValue(value.regular_window_seconds) ?? finiteNumberValue(value.primary_window_seconds),
+            resetAt: stringValue(value.regular_reset_at) || stringValue(value.primary_reset_at) || null
+        }
+        : null;
+    const secondaryWindow = weeklyRemaining !== null || weeklyUsed !== null
+        ? {
+            usedPercent: weeklyUsed ?? (weeklyRemaining === null ? null : 100 - weeklyRemaining),
+            windowSeconds: finiteNumberValue(value.weekly_window_seconds) ?? finiteNumberValue(value.secondary_window_seconds) ?? 604800,
+            resetAt: stringValue(value.weekly_reset_at) || stringValue(value.secondary_reset_at) || null
+        }
+        : null;
+
+    return { primaryWindow, secondaryWindow };
+}
+
 function stringValue(value: unknown): string {
     return typeof value === 'string' ? value.trim() : '';
 }
@@ -229,6 +266,12 @@ function numberValue(value: unknown): number | null {
     const number = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
 
     return Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : null;
+}
+
+function finiteNumberValue(value: unknown): number | null {
+    const number = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+
+    return Number.isFinite(number) ? number : null;
 }
 
 function parseArgs(input: string): string[] {

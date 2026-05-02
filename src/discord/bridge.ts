@@ -114,7 +114,7 @@ import { renderWorkspaceCard, WorkspaceCardGit } from './workspaceCard.js';
 type ResponseTarget = Message | ChatInputCommandInteraction;
 type ComponentInteraction = ButtonInteraction | StringSelectMenuInteraction;
 type UsageDashboardView = { components: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[]; files: AttachmentBuilder[] };
-type UsageDashboardSession = { id: string; createdAt: number; accounts: AccountSummary[]; pages: Buffer[] };
+type UsageDashboardSession = { id: string; createdAt: number; accounts: AccountSummary[]; pages: Buffer[]; overviewPageCount: number };
 type ModelPickerSession = { id: string; createdAt: number; provider: ProviderType; pages: ModelChoiceMetadata[][] };
 type PromptOptions = {
     fresh?: boolean;
@@ -263,7 +263,7 @@ const MCP_ADD_BUTTON_ID = 'discode:add-mcp';
 const MCP_ADD_MODAL_ID = 'discode:add-mcp-modal';
 const RESPONSE_CARD_PREV_ID = 'discode:response-prev';
 const RESPONSE_CARD_NEXT_ID = 'discode:response-next';
-const COMPONENT_IDLE_TTL_MS = 60 * 1000;
+const COMPONENT_IDLE_TTL_MS = 5 * 60 * 1000;
 const USAGE_DASHBOARD_TTL_MS = COMPONENT_IDLE_TTL_MS;
 const MODEL_SELECT_PAGE_SIZE = 24;
 const ACCOUNT_ADJECTIVES = ['North', 'Bright', 'Clear', 'Prime', 'Stone', 'Swift', 'True', 'Silver', 'Golden', 'Blue', 'Red', 'Green', 'Quiet', 'Open', 'Steady', 'Fresh'];
@@ -1139,8 +1139,10 @@ export class DiscordCodexBridge {
 
         if (interaction.isButton() && interaction.customId.startsWith(USAGE_ACTIVATE_ACCOUNT_ID)) {
             await interaction.deferUpdate();
-            const page = Math.max(1, Number(interaction.customId.split(':').at(-1)) || 1);
-            const account = await this.accounts.switchTo(String(page));
+            const parts = interaction.customId.split(':');
+            const accountIndex = Math.max(1, Number(parts.at(-2)) || 1);
+            const page = Math.max(0, Number(parts.at(-1)) || 0);
+            const account = await this.accounts.switchTo(String(accountIndex));
             const dashboard = await this.createUsageDashboard(page);
 
             await interaction.editReply({
@@ -2152,10 +2154,7 @@ export class DiscordCodexBridge {
 
         if (!pending || pending.expiresAt < Date.now()) {
             pendingLimitRetries.delete(retryId);
-            await interaction.followUp({
-                content: 'That retry expired after 60 seconds of inactivity.',
-                flags: MessageFlags.Ephemeral
-            }).catch(() => undefined);
+            await this.disableMessageComponents(interaction.message);
             return;
         }
         pendingLimitRetries.delete(retryId);
@@ -2619,9 +2618,16 @@ export class DiscordCodexBridge {
 
     private async handleCodexBrowserLogin(interaction: ButtonInteraction): Promise<void> {
         const login = await startCodexBrowserLogin();
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+                .setLabel('Open Codex login')
+                .setStyle(ButtonStyle.Link)
+                .setURL(login.url)
+        );
 
         await interaction.reply({
-            content: `Open this Codex login link, then return here when it finishes:\n${login.url}`,
+            content: 'Open the Codex login link, then return here when it finishes.',
+            components: [row],
             flags: MessageFlags.Ephemeral
         });
         const tokens = await login.callback;
@@ -2634,14 +2640,21 @@ export class DiscordCodexBridge {
             auth_data: { ...tokens }
         }, true);
 
-        await interaction.editReply(`Added and activated ${account.name}.`);
+        await interaction.editReply({ content: `Added and activated ${account.name}.`, components: [] });
     }
 
     private async handleCodexDeviceLogin(interaction: ButtonInteraction): Promise<void> {
         const login = await startCodexDeviceLogin();
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+                .setLabel('Open Codex device login')
+                .setStyle(ButtonStyle.Link)
+                .setURL(login.url)
+        );
 
         await interaction.reply({
-            content: `Open ${login.url} and enter code **${login.code}**. I will finish adding the account after authorization.`,
+            content: `Enter code **${login.code}** on the Codex device login page. I will finish adding the account after authorization.`,
+            components: [row],
             flags: MessageFlags.Ephemeral
         });
         const tokens = await login.callback;
@@ -2654,7 +2667,7 @@ export class DiscordCodexBridge {
             auth_data: { ...tokens }
         }, true);
 
-        await interaction.editReply(`Added and activated ${account.name}.`);
+        await interaction.editReply({ content: `Added and activated ${account.name}.`, components: [] });
     }
 
     private async handleAnthropicLoginStart(interaction: ButtonInteraction, method: 'max' | 'console'): Promise<void> {
@@ -2669,13 +2682,17 @@ export class DiscordCodexBridge {
         });
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
+                .setLabel('Open Anthropic login')
+                .setStyle(ButtonStyle.Link)
+                .setURL(login.url),
+            new ButtonBuilder()
                 .setCustomId(`${ACCOUNT_AUTH_CODE_BUTTON_ID}:${id}`)
                 .setLabel('Paste code')
                 .setStyle(ButtonStyle.Primary)
         );
 
         await interaction.reply({
-            content: `Open this Anthropic login link, then paste the returned authorization code:\n${login.url}`,
+            content: 'Open the Anthropic login link, then paste the returned authorization code.',
             components: [row],
             flags: MessageFlags.Ephemeral
         });
@@ -3560,14 +3577,18 @@ export class DiscordCodexBridge {
         const rawAccounts = rawState?.accounts || [];
         const usages = new Map<string, AccountUsage>();
         const sessionId = this.createUsageSessionId();
+        const overviewPageCount = Math.max(1, Math.ceil(Math.max(accounts.length, 1) / 8));
 
         await Promise.all(rawAccounts.map(async account => {
             usages.set(account.id, await fetchAccountUsage(account));
         }));
 
         const accountPages = await Promise.all(accounts.map((_account, index) => renderUsageCard(this.createUsageCardData(accounts, usages, index))));
+        const overviewPages = await Promise.all(Array.from({ length: overviewPageCount }, (_value, index) => {
+            return renderUsageOverviewCard(this.createUsageOverviewData(accounts, usages, index, overviewPageCount));
+        }));
         const pages = [
-            await renderUsageOverviewCard(this.createUsageOverviewData(accounts, usages)),
+            ...overviewPages,
             ...accountPages
         ];
 
@@ -3575,7 +3596,8 @@ export class DiscordCodexBridge {
             id: sessionId,
             createdAt: Date.now(),
             accounts,
-            pages
+            pages,
+            overviewPageCount
         });
 
         return this.createUsageDashboardView(sessionId, page) || {
@@ -3593,16 +3615,19 @@ export class DiscordCodexBridge {
         session.createdAt = Date.now();
 
         return {
-            components: this.createUsageRows(normalizedPage, sessionId, session.accounts),
+            components: this.createUsageRows(normalizedPage, sessionId, session.accounts, pageCount, session.overviewPageCount),
             files: [new AttachmentBuilder(session.pages[normalizedPage], { name: `${this.commandName}-usage-${sessionId}-${normalizedPage + 1}.png` })]
         };
     }
 
-    private createUsageOverviewData(accounts: AccountSummary[], usages: Map<string, AccountUsage>): UsageOverviewData {
+    private createUsageOverviewData(accounts: AccountSummary[], usages: Map<string, AccountUsage>, page = 0, pageCount = 1): UsageOverviewData {
         const providers = new Map<string, { total: number; count: number }>();
+        const pageSize = 8;
+        const start = page * pageSize;
+        const accountSlice = accounts.slice(start, start + pageSize);
 
         for (const account of accounts) {
-            const remaining = this.getWeeklyRemaining(usages.get(account.id));
+            const remaining = this.getBestRemaining(usages.get(account.id));
             const entry = providers.get(account.provider) || { total: 0, count: 0 };
 
             if (remaining !== null) {
@@ -3611,14 +3636,18 @@ export class DiscordCodexBridge {
             }
             providers.set(account.provider, entry);
         }
+        const activeAccount = accounts.find(account => account.active);
 
         return {
             title: `${this.botName} Usage Limits`,
-            accounts: accounts.map(account => ({
+            totalAccounts: accounts.length,
+            activeName: activeAccount ? this.getAccountAlias(activeAccount) : null,
+            pageLabel: pageCount > 1 ? `Overview ${page + 1}/${pageCount}` : 'Overview',
+            accounts: accountSlice.map(account => ({
                 name: this.getAccountAlias(account),
                 provider: account.provider,
                 active: account.active,
-                remainingPercent: this.getWeeklyRemaining(usages.get(account.id))
+                remainingPercent: this.getBestRemaining(usages.get(account.id))
             })),
             providers: [...providers].map(([name, value]) => ({
                 name: this.capitalize(name),
@@ -3634,6 +3663,7 @@ export class DiscordCodexBridge {
         const normalizedPage = Math.min(Math.max(page, 0), pageCount - 1);
         const account = accounts[normalizedPage];
         const usage = account ? usages.get(account.id) : undefined;
+        const windows = this.createUsageWindows(usage);
 
         return {
             title: `${this.botName} Usage`,
@@ -3645,16 +3675,30 @@ export class DiscordCodexBridge {
             credential: account?.credentialLabel || 'Not configured',
             active: account?.active || false,
             credits: usage?.creditsBalance || null,
-            primary: this.createUsageCardWindow('5-hour limit', usage?.primaryWindow),
-            secondary: this.createUsageCardWindow('Weekly limit', usage?.secondaryWindow),
+            primary: windows[0],
+            secondary: windows[1],
             generatedAt: new Date().toLocaleString()
         };
     }
 
-    private createUsageRows(page: number, sessionId: string, accounts: AccountSummary[]): ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] {
-        const pageCount = Math.max(1, accounts.length + 1);
+    private createUsageRows(page: number, sessionId: string, accounts: AccountSummary[], pageCount: number, overviewPageCount: number): ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] {
         const normalizedPage = Math.min(Math.max(page, 0), pageCount - 1);
-        const account = normalizedPage > 0 ? accounts[normalizedPage - 1] : null;
+        const accountIndex = normalizedPage - overviewPageCount;
+        const account = accountIndex >= 0 ? accounts[accountIndex] : null;
+        const overviewOptions = Array.from({ length: overviewPageCount }, (_value, index) => ({
+            label: overviewPageCount > 1 ? `Overview ${index + 1}` : 'Overview',
+            value: String(index),
+            description: index === 0 ? 'Provider totals and account usage limits.' : 'More account usage limits.',
+            default: normalizedPage === index
+        })).slice(0, 25);
+        const accountOptions = accounts
+            .slice(0, Math.max(0, 25 - overviewOptions.length))
+            .map((account, index) => ({
+                label: this.getAccountAlias(account).slice(0, 100),
+                value: String(index + overviewPageCount),
+                description: `Plan ${this.capitalize(account.planType)}`.slice(0, 100),
+                default: normalizedPage === index + overviewPageCount
+            }));
         const rows: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] = [
             new ActionRowBuilder<ButtonBuilder>().addComponents(
                 new ButtonBuilder()
@@ -3663,7 +3707,7 @@ export class DiscordCodexBridge {
                     .setStyle(ButtonStyle.Secondary)
                     .setDisabled(normalizedPage === 0),
                 new ButtonBuilder()
-                    .setCustomId(`${USAGE_ACTIVATE_ACCOUNT_ID}:${normalizedPage}`)
+                    .setCustomId(`${USAGE_ACTIVATE_ACCOUNT_ID}:${account ? account.index : 0}:${normalizedPage}`)
                     .setLabel(account ? account.active ? 'Active account' : 'Use this account' : 'Overview')
                     .setStyle(account?.active ? ButtonStyle.Success : ButtonStyle.Primary)
                     .setDisabled(!account || account.active === true),
@@ -3682,18 +3726,8 @@ export class DiscordCodexBridge {
                     .setCustomId(`${ACCOUNT_SELECT_ID}:${sessionId}`)
                     .setPlaceholder('Usage page')
                     .addOptions([
-                        {
-                            label: 'Overview',
-                            value: '0',
-                            description: 'All providers and account usage limits.',
-                            default: normalizedPage === 0
-                        },
-                        ...accounts.slice(0, 24).map((account, index) => ({
-                            label: this.getAccountAlias(account).slice(0, 100),
-                            value: String(index + 1),
-                            description: `Plan ${this.capitalize(account.planType)}`.slice(0, 100),
-                            default: normalizedPage === index + 1
-                        }))
+                        ...overviewOptions,
+                        ...accountOptions
                     ])
             )
         ];
@@ -3725,6 +3759,36 @@ export class DiscordCodexBridge {
     private createUsageSessionId(): string {
         return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     }
+
+    private createUsageWindows(usage: AccountUsage | undefined): [UsageCardWindow, UsageCardWindow] {
+        const primary = usage?.primaryWindow || null;
+        const secondary = usage?.secondaryWindow || null;
+
+        if (primary && secondary) {
+            return [
+                this.createUsageCardWindow(this.usageWindowLabel(primary, 'Usage limit'), primary),
+                this.createUsageCardWindow(this.usageWindowLabel(secondary, 'Weekly limit'), secondary)
+            ];
+        }
+        if (secondary) {
+            return [
+                this.createUsageCardWindow(this.usageWindowLabel(secondary, 'Weekly limit'), secondary),
+                this.emptyUsageCardWindow('No second limit')
+            ];
+        }
+        if (primary) {
+            return [
+                this.createUsageCardWindow(this.usageWindowLabel(primary, 'Usage limit'), primary),
+                this.emptyUsageCardWindow('No weekly limit')
+            ];
+        }
+
+        return [
+            this.emptyUsageCardWindow('Usage limit'),
+            this.emptyUsageCardWindow('Weekly limit')
+        ];
+    }
+
     private createUsageCardWindow(label: string, window: AccountUsage['primaryWindow']): UsageCardWindow {
         return {
             label,
@@ -3734,7 +3798,27 @@ export class DiscordCodexBridge {
         };
     }
 
-    private getWeeklyRemaining(usage: AccountUsage | undefined): number | null {
+    private emptyUsageCardWindow(label: string): UsageCardWindow {
+        return {
+            label,
+            percent: null,
+            duration: 'Not reported',
+            reset: 'unknown'
+        };
+    }
+
+    private usageWindowLabel(window: AccountUsage['primaryWindow'], fallback: string): string {
+        const seconds = window?.windowSeconds;
+
+        if (seconds === 604800) return 'Weekly limit';
+        if (seconds === 18000) return '5-hour limit';
+        if (seconds && seconds >= 86400) return `${Math.round(seconds / 86400)}d limit`;
+        if (seconds && seconds >= 3600) return `${Math.round(seconds / 3600)}h limit`;
+
+        return fallback;
+    }
+
+    private getBestRemaining(usage: AccountUsage | undefined): number | null {
         const used = usage?.secondaryWindow?.usedPercent ?? usage?.primaryWindow?.usedPercent;
 
         if (used === undefined || used === null) return null;
@@ -3763,7 +3847,7 @@ export class DiscordCodexBridge {
     }
 
     private isUsageLimitText(text: string): boolean {
-        return /usage limit|rate limit|quota|too many requests|429|try again at|weekly limit|5.?hour/i.test(text);
+        return /usage limit|rate limit|quota|too many requests|429|try again at|weekly limit|5.?hour|credit limit|insufficient credits/i.test(text);
     }
 
     private extractResetTime(text: string): string | null {
@@ -4810,10 +4894,6 @@ export class DiscordCodexBridge {
         pendingAuthCodes.forEach((pending, id) => {
             if (pending.expiresAt < Date.now()) pendingAuthCodes.delete(id);
         });
-        await interaction.reply({
-            content: 'This interaction expired after 60 seconds of inactivity.',
-            flags: MessageFlags.Ephemeral
-        }).catch(() => undefined);
         await this.disableMessageComponents(interaction.message);
 
         return true;
