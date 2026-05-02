@@ -27,6 +27,13 @@ import { promisify } from 'node:util';
 import { BridgeConfig } from '../config.js';
 import { CodexReviewOptions, CodexRunResult, CodexRunner, CodexUsage } from '../codex/runner.js';
 import { AccountProvider, AccountRouter, AccountSummary } from '../accounts/router.js';
+import {
+    createAnthropicApiKey,
+    exchangeAnthropicCode,
+    startAnthropicLogin,
+    startCodexBrowserLogin,
+    startCodexDeviceLogin
+} from '../accounts/oauth.js';
 import { fetchAccountUsage, AccountUsage } from '../codex/usage.js';
 import {
     clearConversation,
@@ -140,6 +147,13 @@ type PendingSteer = { conversationKey: string; prompt: string; options: PromptOp
 type QueuedSteer = PendingSteer & { noticeChannelId: string };
 type PendingAccess = { target: ResponseTarget; conversationKey: string; prompt: string; options: PromptOptions };
 type PendingLimit = { retry: LimitRetry; expiresAt: number };
+type PendingDmChoice = { conversationKey: string; prompt: string; options: PromptOptions; expiresAt: number };
+type PendingAuthCode = {
+    provider: AccountProvider;
+    method: 'anthropic-max' | 'anthropic-api-key';
+    verifier: string;
+    expiresAt: number;
+};
 type DashboardView = { components: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[]; files: AttachmentBuilder[] };
 type CardEditPayload = DashboardView & { content: string; embeds: []; attachments: [] };
 type ResponseCardSession = {
@@ -169,6 +183,8 @@ const pendingSteers = new Map<string, PendingSteer>();
 const queuedSteers = new Map<string, QueuedSteer[]>();
 const pendingAccessRequests = new Map<string, PendingAccess>();
 const pendingLimitRetries = new Map<string, PendingLimit>();
+const pendingDmChoices = new Map<string, PendingDmChoice>();
+const pendingAuthCodes = new Map<string, PendingAuthCode>();
 const pendingProviderInstalls = new Map<string, PendingProviderInstall>();
 const responseCardSessions = new Map<string, ResponseCardSession>();
 const fileExplorerSessions = new Map<string, FileExplorerSession>();
@@ -213,7 +229,12 @@ const CUSTOM_INSTRUCTIONS_MODAL_ID = 'discode:custom-instructions-modal';
 const ADD_ACCOUNT_BUTTON_ID = 'discode:add-account';
 const ADD_ACCOUNT_PROVIDER_SELECT_ID = 'discode:add-account-provider';
 const ADD_ACCOUNT_MODAL_ID = 'discode:add-account-modal';
+const ACCOUNT_LOGIN_BUTTON_ID = 'discode:account-login';
+const ACCOUNT_AUTH_CODE_BUTTON_ID = 'discode:account-auth-code';
+const ACCOUNT_AUTH_CODE_MODAL_ID = 'discode:account-auth-code-modal';
 const ACCESS_APPROVE_ID = 'discode:approve-access';
+const DM_CONTINUE_BUTTON_ID = 'discode:dm-continue';
+const DM_NEW_BUTTON_ID = 'discode:dm-new';
 const CONVERSATION_SELECT_ID = 'discode:load-conversation';
 const CHAT_LINK_SELECT_ID = 'discode:chat-link';
 const ACCOUNT_SELECT_ID = 'discode:switch-account';
@@ -664,7 +685,9 @@ export class DiscordCodexBridge {
             return;
         }
 
-        if (await this.expireInactiveComponent(interaction)) return;
+        const canOutliveComponentTtl = interaction.isButton() && interaction.customId.startsWith(ACCOUNT_AUTH_CODE_BUTTON_ID);
+
+        if (!canOutliveComponentTtl && await this.expireInactiveComponent(interaction)) return;
 
         if (interaction.isButton() && interaction.customId === MODEL_BUTTON_ID) {
             await this.showModelPicker(interaction);
@@ -713,6 +736,30 @@ export class DiscordCodexBridge {
 
         if (interaction.isButton() && interaction.customId === ADD_ACCOUNT_BUTTON_ID) {
             await this.showAddAccountProviderPicker(interaction);
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId.startsWith(ACCOUNT_LOGIN_BUTTON_ID)) {
+            await this.handleAccountLoginButton(interaction);
+            return;
+        }
+
+        if (interaction.isButton() && interaction.customId.startsWith(ACCOUNT_AUTH_CODE_BUTTON_ID)) {
+            const id = interaction.customId.split(':').at(-1) || '';
+
+            if (!pendingAuthCodes.has(id)) {
+                await interaction.reply({ content: 'That login session expired.', flags: MessageFlags.Ephemeral });
+                return;
+            }
+            await interaction.showModal(this.createAuthCodeModal(id));
+            return;
+        }
+
+        if (interaction.isButton() && (
+            interaction.customId.startsWith(DM_CONTINUE_BUTTON_ID)
+            || interaction.customId.startsWith(DM_NEW_BUTTON_ID)
+        )) {
+            await this.handleDmChoiceButton(interaction);
             return;
         }
 
@@ -918,6 +965,10 @@ export class DiscordCodexBridge {
 
             if (!isAccountProvider(provider)) {
                 await interaction.reply({ content: 'That provider is not supported.', flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (provider === 'codex' || provider === 'anthropic') {
+                await this.showAccountLoginMethods(interaction, provider);
                 return;
             }
             await interaction.showModal(this.createAddAccountModal(provider));
@@ -1297,6 +1348,11 @@ export class DiscordCodexBridge {
             return;
         }
 
+        if (interaction.customId.startsWith(`${ACCOUNT_AUTH_CODE_MODAL_ID}:`)) {
+            await this.handleAuthCodeModal(interaction);
+            return;
+        }
+
         if (interaction.customId.startsWith(`${ADD_ACCOUNT_MODAL_ID}:`)) {
             const provider = interaction.customId.split(':').at(-1) || '';
 
@@ -1389,8 +1445,9 @@ export class DiscordCodexBridge {
 
         const prompt = this.extractMentionPrompt(message, client);
         const isCodexThread = message.channel.isThread() && this.isAgentThreadName(message.channel.name);
+        const isDirectMessage = !message.guild;
 
-        if (prompt === null && !isCodexThread) return false;
+        if (prompt === null && !isCodexThread && !isDirectMessage) return false;
 
         if (!(await this.isAuthorized(message.author.id))) {
             if (prompt !== null) {
@@ -1484,10 +1541,76 @@ export class DiscordCodexBridge {
             return true;
         }
 
+        if (isDirectMessage && await this.shouldAskDmContinuation(message.channel.id)) {
+            await this.sendDmContinuationChoice(message, message.channel.id, codexPrompt, promptOptions);
+            return true;
+        }
+
         const statusMessage = await this.sendThinkingMessage(message.channel as any, `Starting ${this.botName}`);
         await this.runPrompt(statusMessage, message.channel.id, codexPrompt, promptOptions);
 
         return true;
+    }
+
+    private async shouldAskDmContinuation(channelId: string): Promise<boolean> {
+        const conversation = await getConversation(channelId);
+
+        if (!conversation?.updatedAt) return false;
+
+        return Date.now() - Date.parse(conversation.updatedAt) > 60 * 60 * 1000;
+    }
+
+    private async sendDmContinuationChoice(message: Message, conversationKey: string, prompt: string, options: PromptOptions): Promise<void> {
+        const id = this.createUsageSessionId();
+
+        pendingDmChoices.set(id, {
+            conversationKey,
+            prompt,
+            options,
+            expiresAt: Date.now() + COMPONENT_IDLE_TTL_MS
+        });
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`${DM_CONTINUE_BUTTON_ID}:${id}`)
+                .setLabel('Continue previous')
+                .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+                .setCustomId(`${DM_NEW_BUTTON_ID}:${id}`)
+                .setLabel('Start new')
+                .setStyle(ButtonStyle.Secondary)
+        );
+        const choiceMessage = await message.reply({
+            content: 'It has been over an hour since the last DM conversation. Continue the previous chat or start a new one?',
+            components: [row]
+        });
+
+        this.scheduleComponentExpiry(choiceMessage, true);
+    }
+
+    private async handleDmChoiceButton(interaction: ButtonInteraction): Promise<void> {
+        const id = interaction.customId.split(':').at(-1) || '';
+        const pending = pendingDmChoices.get(id);
+
+        if (!pending || pending.expiresAt < Date.now()) {
+            pendingDmChoices.delete(id);
+            await interaction.reply({ content: 'That DM choice expired. Send the prompt again.', flags: MessageFlags.Ephemeral });
+            return;
+        }
+        pendingDmChoices.delete(id);
+        const fresh = interaction.customId.startsWith(DM_NEW_BUTTON_ID);
+
+        await interaction.update({
+            content: fresh ? 'Starting a new DM conversation.' : 'Continuing the previous DM conversation.',
+            components: []
+        });
+        const channel = interaction.channel;
+
+        if (!channel || !('send' in channel)) return;
+        const statusMessage = await this.sendThinkingMessage(channel as any, `Starting ${this.botName}`);
+        await this.runPrompt(statusMessage, pending.conversationKey, pending.prompt, {
+            ...pending.options,
+            fresh
+        });
     }
 
     private async runPrompt(target: ResponseTarget, conversationKey: string, prompt: string, options: PromptOptions): Promise<void> {
@@ -2407,7 +2530,7 @@ export class DiscordCodexBridge {
 
     private async showAddAccountProviderPicker(interaction: ButtonInteraction): Promise<void> {
         await interaction.reply({
-            content: 'Add an API key. Choose the provider, paste the key, then pick a model from settings.',
+            content: 'Choose a provider. Codex and Anthropic support login links; other providers use API keys.',
             components: [
                 new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
                     new StringSelectMenuBuilder()
@@ -2422,6 +2545,190 @@ export class DiscordCodexBridge {
             ],
             flags: MessageFlags.Ephemeral
         });
+    }
+
+    private async showAccountLoginMethods(interaction: StringSelectMenuInteraction, provider: 'codex' | 'anthropic'): Promise<void> {
+        const row = new ActionRowBuilder<ButtonBuilder>();
+
+        if (provider === 'codex') {
+            row.addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`${ACCOUNT_LOGIN_BUTTON_ID}:codex:browser`)
+                    .setLabel('Browser login')
+                    .setStyle(ButtonStyle.Primary),
+                new ButtonBuilder()
+                    .setCustomId(`${ACCOUNT_LOGIN_BUTTON_ID}:codex:device`)
+                    .setLabel('Headless login')
+                    .setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId(`${ACCOUNT_LOGIN_BUTTON_ID}:codex:api`)
+                    .setLabel('API key')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+        } else {
+            row.addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`${ACCOUNT_LOGIN_BUTTON_ID}:anthropic:max`)
+                    .setLabel('Claude login')
+                    .setStyle(ButtonStyle.Primary),
+                new ButtonBuilder()
+                    .setCustomId(`${ACCOUNT_LOGIN_BUTTON_ID}:anthropic:console`)
+                    .setLabel('Create API key')
+                    .setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId(`${ACCOUNT_LOGIN_BUTTON_ID}:anthropic:api`)
+                    .setLabel('API key')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+        }
+
+        await interaction.update({
+            content: provider === 'codex'
+                ? 'Add Codex with a ChatGPT/Codex login link, headless device login, or an OpenAI API key.'
+                : 'Add Anthropic with Claude login, console API-key creation, or a pasted Anthropic API key.',
+            components: [row]
+        });
+    }
+
+    private async handleAccountLoginButton(interaction: ButtonInteraction): Promise<void> {
+        const [, , provider, method] = interaction.customId.split(':');
+
+        if (!isAccountProvider(provider)) {
+            await interaction.reply({ content: 'That provider is not supported.', flags: MessageFlags.Ephemeral });
+            return;
+        }
+        if (method === 'api') {
+            await interaction.showModal(this.createAddAccountModal(provider));
+            return;
+        }
+        if (provider === 'codex' && method === 'browser') {
+            await this.handleCodexBrowserLogin(interaction);
+            return;
+        }
+        if (provider === 'codex' && method === 'device') {
+            await this.handleCodexDeviceLogin(interaction);
+            return;
+        }
+        if (provider === 'anthropic' && (method === 'max' || method === 'console')) {
+            await this.handleAnthropicLoginStart(interaction, method);
+            return;
+        }
+
+        await interaction.reply({ content: 'That login method is not supported.', flags: MessageFlags.Ephemeral });
+    }
+
+    private async handleCodexBrowserLogin(interaction: ButtonInteraction): Promise<void> {
+        const login = await startCodexBrowserLogin();
+
+        await interaction.reply({
+            content: `Open this Codex login link, then return here when it finishes:\n${login.url}`,
+            flags: MessageFlags.Ephemeral
+        });
+        const tokens = await login.callback;
+        const account = await this.accounts.addAccount({
+            name: tokens.email ? `Codex ${tokens.email}` : 'Codex login',
+            provider: 'codex',
+            email: tokens.email,
+            auth_mode: 'session',
+            plan_type: 'session',
+            auth_data: { ...tokens }
+        }, true);
+
+        await interaction.editReply(`Added and activated ${account.name}.`);
+    }
+
+    private async handleCodexDeviceLogin(interaction: ButtonInteraction): Promise<void> {
+        const login = await startCodexDeviceLogin();
+
+        await interaction.reply({
+            content: `Open ${login.url} and enter code **${login.code}**. I will finish adding the account after authorization.`,
+            flags: MessageFlags.Ephemeral
+        });
+        const tokens = await login.callback;
+        const account = await this.accounts.addAccount({
+            name: tokens.email ? `Codex ${tokens.email}` : 'Codex login',
+            provider: 'codex',
+            email: tokens.email,
+            auth_mode: 'session',
+            plan_type: 'session',
+            auth_data: { ...tokens }
+        }, true);
+
+        await interaction.editReply(`Added and activated ${account.name}.`);
+    }
+
+    private async handleAnthropicLoginStart(interaction: ButtonInteraction, method: 'max' | 'console'): Promise<void> {
+        const login = await startAnthropicLogin(method === 'console' ? 'console' : 'max');
+        const id = this.createUsageSessionId();
+
+        pendingAuthCodes.set(id, {
+            provider: 'anthropic',
+            method: method === 'console' ? 'anthropic-api-key' : 'anthropic-max',
+            verifier: login.verifier,
+            expiresAt: Date.now() + 10 * 60 * 1000
+        });
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`${ACCOUNT_AUTH_CODE_BUTTON_ID}:${id}`)
+                .setLabel('Paste code')
+                .setStyle(ButtonStyle.Primary)
+        );
+
+        await interaction.reply({
+            content: `Open this Anthropic login link, then paste the returned authorization code:\n${login.url}`,
+            components: [row],
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    private createAuthCodeModal(id: string): ModalBuilder {
+        return new ModalBuilder()
+            .setCustomId(`${ACCOUNT_AUTH_CODE_MODAL_ID}:${id}`)
+            .setTitle('Finish login')
+            .addComponents(
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('code')
+                        .setLabel('Authorization code or code#state')
+                        .setStyle(TextInputStyle.Paragraph)
+                        .setRequired(true)
+                )
+            );
+    }
+
+    private async handleAuthCodeModal(interaction: ModalSubmitInteraction): Promise<void> {
+        const id = interaction.customId.split(':').at(-1) || '';
+        const pending = pendingAuthCodes.get(id);
+
+        if (!pending || pending.expiresAt < Date.now()) {
+            pendingAuthCodes.delete(id);
+            await interaction.reply({ content: 'That login session expired.', flags: MessageFlags.Ephemeral });
+            return;
+        }
+        pendingAuthCodes.delete(id);
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const code = interaction.fields.getTextInputValue('code').trim();
+        const tokens = await exchangeAnthropicCode(code, pending.verifier);
+        const account = pending.method === 'anthropic-api-key'
+            ? await this.accounts.addAccount({
+                name: 'Anthropic API login',
+                provider: 'anthropic',
+                auth_mode: 'api_key',
+                plan_type: 'api_key',
+                auth_data: {
+                    api_key: await createAnthropicApiKey(tokens),
+                    env_key: this.defaultApiKeyName('anthropic')
+                }
+            }, true)
+            : await this.accounts.addAccount({
+                name: 'Anthropic Claude login',
+                provider: 'anthropic',
+                auth_mode: 'oauth',
+                plan_type: 'oauth',
+                auth_data: { ...tokens }
+            }, true);
+
+        await interaction.editReply(`Added and activated ${account.name}.`);
     }
 
     private createAddAccountModal(provider: AccountProvider): ModalBuilder {
@@ -4022,7 +4329,7 @@ export class DiscordCodexBridge {
             new ActionRowBuilder<ButtonBuilder>().addComponents(
                 new ButtonBuilder()
                     .setCustomId(ADD_ACCOUNT_BUTTON_ID)
-                    .setLabel('Add API key')
+                    .setLabel('Add account')
                     .setStyle(ButtonStyle.Primary),
                 new ButtonBuilder()
                     .setCustomId(MODEL_CUSTOM_BUTTON_ID)
@@ -4497,6 +4804,12 @@ export class DiscordCodexBridge {
         pendingLimitRetries.forEach((pending, id) => {
             if (pending.expiresAt < Date.now()) pendingLimitRetries.delete(id);
         });
+        pendingDmChoices.forEach((pending, id) => {
+            if (pending.expiresAt < Date.now()) pendingDmChoices.delete(id);
+        });
+        pendingAuthCodes.forEach((pending, id) => {
+            if (pending.expiresAt < Date.now()) pendingAuthCodes.delete(id);
+        });
         await interaction.reply({
             content: 'This interaction expired after 60 seconds of inactivity.',
             flags: MessageFlags.Ephemeral
@@ -4529,6 +4842,12 @@ export class DiscordCodexBridge {
         }
         for (const [channelId, focus] of fileExplorerFocusByChannel) {
             if (now - focus.updatedAt > 30 * 60 * 1000) fileExplorerFocusByChannel.delete(channelId);
+        }
+        for (const [id, pending] of pendingDmChoices) {
+            if (pending.expiresAt < now) pendingDmChoices.delete(id);
+        }
+        for (const [id, pending] of pendingAuthCodes) {
+            if (pending.expiresAt < now) pendingAuthCodes.delete(id);
         }
     }
 

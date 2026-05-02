@@ -44,6 +44,7 @@ export interface UsageOverviewData {
 
 const WIDTH = 1200;
 const HEIGHT = 760;
+const OVERVIEW_HEIGHT = 980;
 
 export async function renderUsageCard(data: UsageCardData): Promise<Buffer> {
     return renderSvgToPng(renderSvg(data));
@@ -58,7 +59,7 @@ function renderSvg(data: UsageCardData): string {
 
     return [
         `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">`,
-        '<rect x="1" y="1" width="1198" height="758" rx="34" fill="#202123" stroke="#343541" stroke-width="2"/>',
+        `<rect x="1" y="1" width="${WIDTH - 2}" height="${HEIGHT - 2}" rx="34" fill="#202123" stroke="#343541" stroke-width="2"/>`,
         text(pageLabel, 1112, 74, 22, 240, '#8e8ea0', 600, 'end'),
         text(data.accountName, 88, 116, 42, 400, '#f7f7f8', 780),
         meta('Provider', providerLabel(data.provider), 88, 174, 180),
@@ -80,16 +81,16 @@ function renderOverviewSvg(data: UsageOverviewData): string {
     const providers = data.providers.slice(0, 5);
 
     return [
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">`,
-        '<rect x="1" y="1" width="1198" height="758" rx="34" fill="#202123" stroke="#343541" stroke-width="2"/>',
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${OVERVIEW_HEIGHT}" viewBox="0 0 ${WIDTH} ${OVERVIEW_HEIGHT}">`,
+        `<rect x="1" y="1" width="${WIDTH - 2}" height="${OVERVIEW_HEIGHT - 2}" rx="34" fill="#202123" stroke="#343541" stroke-width="2"/>`,
         text('Overview', 1112, 74, 22, 240, '#8e8ea0', 600, 'end'),
         text(data.title, 88, 112, 42, 440, '#f7f7f8', 780),
         text(`${totalAccounts} account${totalAccounts === 1 ? '' : 's'} · Active ${active?.name || 'none'}`, 88, 164, 22, 760, '#8e8ea0', 540),
         text('Provider usage limits', 88, 238, 28, 420, '#f7f7f8', 740),
-        ...providers.map((provider, index) => overviewRow(provider.name, `${provider.accountCount} account${provider.accountCount === 1 ? '' : 's'}`, provider.remainingPercent, 88, 290 + index * 66, 456)),
+        ...providers.map((provider, index) => overviewRow(provider.name, `${provider.accountCount} account${provider.accountCount === 1 ? '' : 's'}`, provider.remainingPercent, 88, 292 + index * 82, 456)),
         text('Account split', 664, 238, 28, 320, '#f7f7f8', 740),
-        ...accounts.map((account, index) => overviewRow(account.name, providerLabel(account.provider), account.remainingPercent, 664, 290 + index * 48, 448, account.active)),
-        text(data.generatedAt, 600, 704, 20, 360, '#8e8ea0', 500, 'middle'),
+        ...accounts.map((account, index) => overviewRow(account.name, providerLabel(account.provider), account.remainingPercent, 664, 292 + index * 76, 448, account.active)),
+        text(data.generatedAt, 600, 924, 20, 360, '#8e8ea0', 500, 'middle'),
         '</svg>'
     ].join('');
 }
@@ -101,8 +102,8 @@ function overviewRow(labelValue: string, detail: string, remainingPercent: numbe
     return [
         text(labelValue, x, y, 22, width - 150, labelColor, active ? 760 : 620),
         text(percentLabel, x + width, y, 20, 140, '#f7f7f8', 640, 'end'),
-        text(detail, x, y + 24, 17, width - 150, '#8e8ea0', 520),
-        bar(remainingPercent === null ? null : 100 - remainingPercent, x, y + 36, width, 16)
+        text(detail, x, y + 28, 17, width - 150, '#8e8ea0', 520),
+        bar(remainingPercent === null ? null : 100 - remainingPercent, x, y + 42, width, 16)
     ].join('');
 }
 

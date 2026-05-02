@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { refreshAnthropicTokens, refreshCodexTokens, tokenClaims } from './oauth.js';
 
 export type AccountProvider = 'codex' | 'opencode' | 'anthropic' | 'zai' | 'qwen' | 'groq' | 'custom';
 
@@ -73,15 +74,7 @@ export class AccountRouter {
 
     async getActiveAccount(provider?: AccountProvider | null): Promise<DiscodeAccount | null> {
         const state = await this.readState();
-        const accounts = this.getOrderedAccounts(state).map(item => item.account);
-
-        if (provider) {
-            const active = accounts.find(account => account.id === state.active_account_id && this.normalizeProvider(account.provider) === provider);
-
-            return active || accounts.find(account => this.normalizeProvider(account.provider) === provider) || null;
-        }
-
-        return accounts.find(account => account.id === state.active_account_id) || accounts[0] || null;
+        return this.selectActiveAccount(state, provider);
     }
 
     async getActiveProvider(): Promise<AccountProvider | null> {
@@ -97,10 +90,18 @@ export class AccountRouter {
     }
 
     async getActiveEnvironment(provider?: AccountProvider | null): Promise<Record<string, string>> {
-        const account = await this.getActiveAccount(provider);
+        const state = await this.readState();
+        const account = this.selectActiveAccount(state, provider);
         const env: Record<string, string> = {};
 
         if (!account) return env;
+
+        if (await this.refreshLoginIfNeeded(account)) {
+            await this.writeState(state);
+            if (this.normalizeProvider(account.provider) === 'codex' && state.active_account_id === account.id) {
+                await this.writeCodexAuth(account);
+            }
+        }
 
         for (const [key, value] of Object.entries(account.env || {})) {
             if (typeof value === 'string' && key.trim()) env[key] = value;
@@ -108,9 +109,22 @@ export class AccountRouter {
 
         const authData = account.auth_data || {};
         const apiKey = this.stringValue(authData.api_key) || this.stringValue(authData.key) || this.stringValue(authData.token);
+        const accessToken = this.stringValue(authData.access_token) || this.stringValue(authData.access);
+        const refreshToken = this.stringValue(authData.refresh_token) || this.stringValue(authData.refresh);
+        const accountId = this.stringValue(authData.account_id) || this.stringValue(authData.accountId);
         const envKey = this.stringValue(authData.env_key);
+        const normalizedProvider = this.normalizeProvider(account.provider);
 
         if (apiKey) env[envKey || 'OPENAI_API_KEY'] = apiKey;
+        if (normalizedProvider === 'codex' && accessToken) {
+            env.CODEX_ACCESS_TOKEN = accessToken;
+            if (refreshToken) env.CODEX_REFRESH_TOKEN = refreshToken;
+            if (accountId) env.CODEX_ACCOUNT_ID = accountId;
+        }
+        if (normalizedProvider === 'anthropic' && accessToken) {
+            env.ANTHROPIC_AUTH_TOKEN = accessToken;
+            if (refreshToken) env.ANTHROPIC_REFRESH_TOKEN = refreshToken;
+        }
         this.assignAuthEnv(env, 'OPENAI_BASE_URL', authData.base_url);
         this.assignAuthEnv(env, 'OPENAI_ORG_ID', authData.organization);
         this.assignAuthEnv(env, 'OPENAI_PROJECT_ID', authData.project);
@@ -249,6 +263,10 @@ export class AccountRouter {
         if (this.normalizeProvider(account.provider) !== 'codex') return;
         if (!this.hasCodexSession(account)) return;
 
+        await this.writeCodexAuth(account);
+    }
+
+    private async writeCodexAuth(account: DiscodeAccount): Promise<void> {
         const tokens = { ...(account.auth_data || {}) };
         delete tokens.type;
         mkdirSync(path.dirname(this.codexAuthPath), { recursive: true });
@@ -256,6 +274,46 @@ export class AccountRouter {
             tokens,
             last_refresh: new Date().toISOString()
         }, null, 2) + '\n', { mode: 0o600 });
+    }
+
+    private selectActiveAccount(state: AccountState, provider?: AccountProvider | null): DiscodeAccount | null {
+        const accounts = this.getOrderedAccounts(state).map(item => item.account);
+
+        if (provider) {
+            const active = accounts.find(account => account.id === state.active_account_id && this.normalizeProvider(account.provider) === provider);
+
+            return active || accounts.find(account => this.normalizeProvider(account.provider) === provider) || null;
+        }
+
+        return accounts.find(account => account.id === state.active_account_id) || accounts[0] || null;
+    }
+
+    private async refreshLoginIfNeeded(account: DiscodeAccount): Promise<boolean> {
+        const provider = this.normalizeProvider(account.provider);
+        const authData = account.auth_data || {};
+        const refreshToken = this.stringValue(authData.refresh_token) || this.stringValue(authData.refresh);
+        const expiresAt = this.timestampValue(authData.expires_at) || this.timestampValue(authData.expires);
+
+        if (!refreshToken || !expiresAt || expiresAt - Date.now() > 60_000) return false;
+
+        const tokens = provider === 'anthropic'
+            ? await refreshAnthropicTokens(refreshToken)
+            : provider === 'codex'
+                ? await refreshCodexTokens(refreshToken)
+                : null;
+
+        if (!tokens) return false;
+
+        account.auth_data = {
+            ...authData,
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token || refreshToken,
+            expires_at: tokens.expires_at,
+            ...(tokens.id_token ? { id_token: tokens.id_token } : {}),
+            ...(tokens.account_id ? { account_id: tokens.account_id } : this.extractAccountId(tokens.id_token || tokens.access_token))
+        };
+
+        return true;
     }
 
     private normalizeProvider(provider: string | undefined): AccountProvider {
@@ -288,6 +346,16 @@ export class AccountRouter {
 
     private hasCodexSession(account: DiscodeAccount): boolean {
         return Boolean(account.auth_data?.access_token && account.auth_data?.account_id);
+    }
+
+    private extractAccountId(token: string | undefined): { account_id?: string } {
+        const claims = tokenClaims(token);
+        const auth = claims['https://api.openai.com/auth'];
+        const authObject = auth && typeof auth === 'object' ? auth as Record<string, unknown> : {};
+        const accountId = this.stringValue(authObject.chatgpt_account_id)
+            || this.stringValue(claims.chatgpt_account_id);
+
+        return accountId ? { account_id: accountId } : {};
     }
 
     private accountName(account: Partial<DiscodeAccount>, index: number): string {
@@ -371,5 +439,21 @@ export class AccountRouter {
 
     private stringValue(value: unknown): string {
         return typeof value === 'string' ? value.trim() : '';
+    }
+
+    private timestampValue(value: unknown): number | null {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return value < 9999999999 ? value * 1000 : value;
+        }
+        if (typeof value === 'string' && value.trim()) {
+            const number = Number(value);
+
+            if (Number.isFinite(number)) return number < 9999999999 ? number * 1000 : number;
+            const parsed = Date.parse(value);
+
+            return Number.isFinite(parsed) ? parsed : null;
+        }
+
+        return null;
     }
 }

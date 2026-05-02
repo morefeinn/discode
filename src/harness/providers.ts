@@ -80,11 +80,7 @@ function runOpenAiTurn(context: HarnessContext, messages: any[], tools: any[]): 
 async function runAnthropicTurn(context: HarnessContext, messages: any[], tools: any[]): Promise<ProviderTurnResult> {
     const response = await fetch(`${trimSlash(context.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com')}/v1/messages`, {
         method: 'POST',
-        headers: {
-            'x-api-key': apiKey(context),
-            'anthropic-version': context.env.ANTHROPIC_VERSION || '2023-06-01',
-            'content-type': 'application/json'
-        },
+        headers: anthropicHeaders(context),
         body: JSON.stringify({
             model: context.model,
             max_tokens: 4096,
@@ -231,6 +227,31 @@ function apiKey(context: HarnessContext): string {
     if (!key) throw new Error(`Missing API key for native ${context.backend} harness.`);
 
     return key;
+}
+
+function anthropicHeaders(context: HarnessContext): Record<string, string> {
+    const headers: Record<string, string> = {
+        'anthropic-version': context.env.ANTHROPIC_VERSION || '2023-06-01',
+        'content-type': 'application/json'
+    };
+
+    if (context.env.ANTHROPIC_AUTH_TOKEN) {
+        const incomingBeta = context.env.ANTHROPIC_BETA || '';
+        const betas = [
+            'oauth-2025-04-20',
+            'interleaved-thinking-2025-05-14',
+            ...incomingBeta.split(',').map(value => value.trim()).filter(Boolean)
+        ];
+
+        headers.authorization = `Bearer ${context.env.ANTHROPIC_AUTH_TOKEN}`;
+        headers['anthropic-beta'] = Array.from(new Set(betas)).join(',');
+        headers['user-agent'] = 'claude-cli/2.1.2 (external, cli)';
+        return headers;
+    }
+
+    headers['x-api-key'] = apiKey(context);
+
+    return headers;
 }
 
 function openAiRequestBody(context: HarnessContext, messages: any[], tools: any[]): Record<string, unknown> {
