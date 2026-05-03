@@ -2,6 +2,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { clearLine, cursorTo } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -81,6 +82,17 @@ function row(label, value) {
 function title(value) {
     console.log('');
     console.log(color(`== ${value}`, colors.bold));
+}
+
+function clearScreen() {
+    if (!process.stdout.isTTY || process.env.NO_CLEAR === '1' || process.env.NO_CLEAR === 'true') return;
+    process.stdout.write('\x1Bc');
+}
+
+function setupScreen(value, subtitle = '') {
+    clearScreen();
+    banner(value);
+    if (subtitle) note(subtitle);
 }
 
 function note(value) {
@@ -214,7 +226,7 @@ function getRuntimeEnv() {
 function defaultDataDir() {
     const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
 
-    return xdgDataHome ? path.join(xdgDataHome, 'discode') : path.join(process.env.HOME || rootDir, '.discode');
+    return xdgDataHome ? path.join(xdgDataHome, 'discode') : path.join(os.homedir() || rootDir, '.discode');
 }
 
 function setupAccountsPath(values) {
@@ -225,12 +237,20 @@ function setupAccountsPath(values) {
 }
 
 function commandExists(name) {
-    return spawnSync('sh', ['-lc', `command -v ${JSON.stringify(name)}`], { encoding: 'utf8' }).status === 0;
+    const result = process.platform === 'win32'
+        ? spawnSync('where', [name], { encoding: 'utf8' })
+        : spawnSync('which', [name], { encoding: 'utf8' });
+
+    return result.status === 0;
 }
 
 function installCommand(name) {
-    if (name === 'bun') return 'curl -fsSL https://bun.sh/install | bash';
-    if (name === 'git') return 'brew install git';
+    if (name === 'bun') {
+        return process.platform === 'win32'
+            ? 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm bun.sh/install.ps1 | iex"'
+            : 'curl -fsSL https://bun.sh/install | bash';
+    }
+    if (name === 'git') return gitInstallCommand();
     if (name === 'codex') return 'bun add -g @openai/codex';
     if (name === 'opencode') return 'bun add -g opencode-ai';
     if (name === 'claude' || name === 'anthropic') return 'bun add -g @anthropic-ai/claude-code';
@@ -238,6 +258,26 @@ function installCommand(name) {
     if (name === 'qwen') return 'bun add -g @qwen-code/qwen-code';
 
     return '';
+}
+
+function gitInstallCommand() {
+    if (process.platform === 'win32') return 'winget install --id Git.Git -e --source winget';
+    if (process.platform === 'darwin') return commandExists('brew') ? 'brew install git' : '';
+    if (commandExists('apt-get')) return `${sudoPrefix()}apt-get update && ${sudoPrefix()}apt-get install -y git`;
+    if (commandExists('dnf')) return `${sudoPrefix()}dnf install -y git`;
+    if (commandExists('yum')) return `${sudoPrefix()}yum install -y git`;
+    if (commandExists('pacman')) return `${sudoPrefix()}pacman -Sy --noconfirm git`;
+    if (commandExists('apk')) return `${sudoPrefix()}apk add git`;
+    if (commandExists('zypper')) return `${sudoPrefix()}zypper install -y git`;
+    if (commandExists('pkg')) return 'pkg install -y git';
+
+    return '';
+}
+
+function sudoPrefix() {
+    if (process.getuid?.() === 0) return '';
+
+    return commandExists('sudo') ? 'sudo ' : '';
 }
 
 async function checkDependencies(rl, headless) {
@@ -250,7 +290,7 @@ async function checkDependencies(rl, headless) {
         success('Runtime dependencies are available');
         return;
     }
-    title('Dependencies');
+    setupScreen('Dependencies', 'Checking Bun and Git');
 
     for (const name of missingRequired) {
         warn(`Missing required dependency: ${name}`);
@@ -274,7 +314,10 @@ async function checkDependencies(rl, headless) {
 
         if (!command) continue;
         note(`Installing ${name}`);
-        const result = spawnSync('sh', ['-lc', command], { stdio: 'inherit' });
+        const result = spawnSync(command, {
+            stdio: 'inherit',
+            shell: true
+        });
 
         if (result.status !== 0 && missingRequired.includes(name)) {
             throw new Error(`Failed to install ${name}.`);
@@ -377,6 +420,7 @@ async function promptSecret(rl, label, current, required) {
                     }).join('');
 
                     value += printable;
+                    rewritePromptLine(promptLabel, value);
                     cleanup();
                     process.stdout.write('\n');
                     resolve(value);
@@ -527,10 +571,9 @@ async function setup() {
     const rl = createPrompter();
 
     try {
-        banner('Installer');
-        note('Configure Discord access, provider routing, and local credentials');
+        setupScreen('Installer', 'Configure Discord access, provider routing, and local credentials');
         await checkDependencies(rl, headless);
-        title('Discord');
+        setupScreen('Discord', 'Paste tokens normally. Secrets display as first and last 3 characters only.');
         const values = {
             DISCORD_TOKEN: await setupSecret(rl, { label: 'Discord bot token', flag: 'token', current: existing.DISCORD_TOKEN, required: true, headless }),
             DISCORD_CLIENT_ID: await setupValue(rl, { label: 'Discord client id', flag: 'client-id', current: existing.DISCORD_CLIENT_ID, required: true, headless }),
@@ -576,7 +619,7 @@ async function setup() {
         values.DISCODE_EXTENSION_ROBLOX_PLACE_ID = flagValue('roblox-place-id') || existing.DISCODE_EXTENSION_ROBLOX_PLACE_ID || '';
 
         if (configureRuntime) {
-            title('Harness runtime');
+            setupScreen('Harness runtime', 'Advanced runtime defaults');
             values.DISCODE_COMMAND_NAME = await setupValue(rl, { label: 'Slash command name override', flag: 'command-name', current: existing.DISCODE_COMMAND_NAME, headless });
             values.DISCODE_DATA_DIR = await setupValue(rl, { label: 'Discode app data folder, blank uses ~/.discode', flag: 'data-dir', current: existing.DISCODE_DATA_DIR, headless });
             values.DISCODE_WORKSPACES_DIR = await setupValue(rl, { label: 'Managed workspaces folder, blank uses app data', flag: 'workspaces-dir', current: existing.DISCODE_WORKSPACES_DIR, headless });
@@ -615,7 +658,7 @@ async function setup() {
 
         await maybeImportCredentials(rl, headless, targetAccountsPath);
         await setupProviderAccounts(rl, headless, targetAccountsPath, values);
-        console.log('');
+        clearScreen();
         box(color('Ready', colors.green), [
             row('env', '.env written with mode 0600'),
             row('accounts', targetAccountsPath),
@@ -635,7 +678,7 @@ async function maybeImportCredentials(rl, headless, targetAccountsPath = account
         note('No existing provider credentials found to import.');
         return;
     }
-    title('Credentials');
+    setupScreen('Credentials', 'Import local provider credentials');
     note(`Found ${candidates.length} local credential source${candidates.length === 1 ? '' : 's'}.`);
     for (const candidate of candidates.slice(0, 8)) {
         note(`${candidate.provider} from ${candidate.source}`);
@@ -669,8 +712,7 @@ async function importCredentials(candidates = null, targetAccountsPath = account
 async function setupProviderAccounts(rl, headless, targetAccountsPath, values) {
     if (headless) return;
 
-    title('Provider accounts');
-    note('Add API keys now, or skip and use the Discord usage dashboard later.');
+    setupScreen('Provider accounts', 'Add API keys now, or skip and use the Discord usage dashboard later.');
     const shouldAdd = !['n', 'no'].includes((await rl.question(promptText('Add provider accounts now? [Y/n]: '))).trim().toLowerCase());
 
     if (!shouldAdd) return;
@@ -838,6 +880,7 @@ function stopExistingInstances() {
         success(`Stopped existing Discode pid ${pid}`);
     }
     fs.rmSync(pidPath, { force: true });
+    if (process.platform === 'win32' || !commandExists('pgrep')) return;
     const pattern = `${rootDir}/src/index.ts`;
     const pgrep = spawnSync('pgrep', ['-f', pattern], { encoding: 'utf8' });
 
@@ -882,7 +925,10 @@ function logs() {
 }
 
 function resolveRuntime() {
-    const bun = spawnSync('sh', ['-lc', 'command -v bun'], { encoding: 'utf8' }).stdout.trim();
+    const result = process.platform === 'win32'
+        ? spawnSync('where', ['bun'], { encoding: 'utf8' })
+        : spawnSync('which', ['bun'], { encoding: 'utf8' });
+    const bun = result.status === 0 ? result.stdout.trim().split(/\r?\n/)[0] : '';
 
     if (bun) return bun;
 

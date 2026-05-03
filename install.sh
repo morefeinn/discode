@@ -4,6 +4,16 @@ set -eu
 repo="${DISCODE_REPO:-https://github.com/morefeinn/discode.git}"
 target="${DISCODE_HOME:-$HOME/discode}"
 
+sudo_cmd() {
+    if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+        printf ""
+    elif command -v sudo >/dev/null 2>&1; then
+        printf "sudo "
+    else
+        printf ""
+    fi
+}
+
 ask_yes() {
     prompt="$1"
 
@@ -24,20 +34,31 @@ ask_yes() {
     esac
 }
 
-install_with_brew() {
-    name="$1"
-
+install_git() {
     if command -v brew >/dev/null 2>&1; then
-        brew install "$name"
-        return 0
+        brew install git
+    elif command -v apt-get >/dev/null 2>&1; then
+        sh -c "$(sudo_cmd)apt-get update && $(sudo_cmd)apt-get install -y git"
+    elif command -v dnf >/dev/null 2>&1; then
+        sh -c "$(sudo_cmd)dnf install -y git"
+    elif command -v yum >/dev/null 2>&1; then
+        sh -c "$(sudo_cmd)yum install -y git"
+    elif command -v pacman >/dev/null 2>&1; then
+        sh -c "$(sudo_cmd)pacman -Sy --noconfirm git"
+    elif command -v apk >/dev/null 2>&1; then
+        sh -c "$(sudo_cmd)apk add git"
+    elif command -v zypper >/dev/null 2>&1; then
+        sh -c "$(sudo_cmd)zypper install -y git"
+    elif command -v pkg >/dev/null 2>&1; then
+        pkg install -y git
+    else
+        return 1
     fi
-
-    return 1
 }
 
 if ! command -v git >/dev/null 2>&1; then
     if ask_yes "Install git"; then
-        install_with_brew git || {
+        install_git || {
             echo "Install git, then run this installer again."
             exit 1
         }
@@ -66,7 +87,7 @@ else
 fi
 
 cd "$target"
-bun install
+bun install --production
 bun link
 
 if [ "${DISCODE_SETUP:-1}" != "0" ]; then

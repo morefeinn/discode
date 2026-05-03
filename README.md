@@ -4,12 +4,21 @@ Discode lets one or more approved Discord users drive local coding agents from D
 
 ## Install
 
+macOS/Linux:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/morefeinn/discode/main/install.sh | sh
 discode start --background
 ```
 
-The installer checks for Git and Bun, asks before installing missing dependencies, links the `discode` CLI, then runs Discode setup.
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/morefeinn/discode/main/install.ps1 | iex
+discode start --background
+```
+
+The installer checks for Git and Bun, asks before installing missing dependencies, installs production dependencies, links the `discode` CLI, then runs Discode setup.
 Existing installs are updated from the latest `main` before dependencies are installed.
 
 Manual install:
@@ -31,6 +40,8 @@ The Discode installer writes a local `.env`. Required values are:
 `ALLOWED_USER_IDS` is comma-separated. `PRIMARY_ALLOWED_USER_ID` defaults to the first allowed user. You can later adjust allowed users and notification behavior from the bot's settings command.
 
 During setup, pasted secrets stay visible only as a short mask such as `abc...xyz`. The setup flow can import existing Codex/OpenCode credentials and can add multiple Codex/OpenAI, Anthropic, Groq, Z.ai, Qwen, OpenCode, or custom accounts immediately.
+
+Setup clears the terminal between major screens so Discord, runtime, credential, and provider prompts stay focused. Set `NO_CLEAR=1` if you need scrollback while debugging.
 
 ## Commands
 
