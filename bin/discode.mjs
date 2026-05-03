@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import {
     checkForUpdate,
@@ -448,46 +449,7 @@ async function setupBoolean(rl, options) {
 
 function createPrompter() {
     if (process.stdin.isTTY) {
-        return {
-            async question(label) {
-                process.stdout.write(label);
-                process.stdin.setRawMode?.(false);
-                process.stdin.resume();
-                process.stdin.setEncoding('utf8');
-
-                return await new Promise((resolve, reject) => {
-                    let value = '';
-                    const onData = chunk => {
-                        const text = String(chunk);
-
-                        if (text.includes('\u0003')) {
-                            cleanup();
-                            reject(new Error('Setup cancelled.'));
-                            return;
-                        }
-
-                        const newlineIndex = text.search(/[\r\n]/);
-
-                        if (newlineIndex >= 0) {
-                            value += text.slice(0, newlineIndex);
-                            cleanup();
-                            resolve(value);
-                            return;
-                        }
-
-                        value += text;
-                    };
-                    const cleanup = () => {
-                        process.stdin.off('data', onData);
-                    };
-
-                    process.stdin.on('data', onData);
-                });
-            },
-            close() {
-                process.stdin.pause();
-            }
-        };
+        return readline.createInterface({ input: process.stdin, output: process.stdout });
     }
     const answers = fs.readFileSync(0, 'utf8').split(/\r?\n/);
     let index = 0;
