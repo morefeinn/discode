@@ -4,7 +4,6 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { clearLine, createInterface, cursorTo } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import {
     checkForUpdate,
@@ -149,12 +148,6 @@ function sanitizeSecret(value) {
         .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
         .replace(/[\u0000-\u001f\u007f]/g, '')
         .trim();
-}
-
-function rewritePromptLine(label, value) {
-    cursorTo(process.stdout, 0);
-    process.stdout.write(`${promptText(label)}${maskSecret(value)}`);
-    clearLine(process.stdout, 1);
 }
 
 function hasFlag(name) {
@@ -387,51 +380,19 @@ async function promptValue(rl, label, current, fallback, required) {
 async function promptSecret(rl, label, current, required) {
     const suffix = current ? ' [set]' : '';
 
-    if (!process.stdin.isTTY || !process.stdin.setRawMode) {
-        const answer = (await rl.question(promptText(`${label}${suffix}: `))).trim();
-        const value = sanitizeSecret(answer) || current || '';
-
-        if (answer) note(`${label}: ${maskSecret(value)}`);
-        if (!required || value) return value;
-        console.log('Required.');
-        return promptSecret(rl, label, current, required);
-    }
-
-    const promptLabel = `${label}${suffix}: `;
-
     while (true) {
-        const answer = await new Promise((resolve, reject) => {
-            const secretRl = createInterface({
-                input: process.stdin,
-                output: process.stdout,
-                terminal: true
-            });
-            const originalWrite = secretRl._writeToOutput;
-            const redraw = () => rewritePromptLine(promptLabel, sanitizeSecret(secretRl.line));
-
-            secretRl._writeToOutput = value => {
-                if (String(value).includes('\n')) {
-                    process.stdout.write('\n');
-                    return;
-                }
-                redraw();
-            };
-            secretRl.on('SIGINT', () => {
-                secretRl.close();
-                reject(new Error('Setup cancelled.'));
-            });
-            secretRl.question(promptText(promptLabel), value => {
-                secretRl._writeToOutput = originalWrite;
-                secretRl.close();
-                process.stdout.write('\n');
-                resolve(value);
-            });
-            redraw();
-        });
+        const answer = await rl.question(promptText(`${label}${suffix}: `));
         const normalized = sanitizeSecret(answer);
         const next = normalized || current || '';
 
-        if (!required || next) return next;
+        if (!required || next) {
+            if (normalized) {
+                clearScreen();
+                note(`${label}: ${maskSecret(next)}`);
+            }
+
+            return next;
+        }
         console.log('Required.');
     }
 }
