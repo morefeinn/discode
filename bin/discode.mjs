@@ -400,6 +400,15 @@ async function promptSecret(rl, label, current, required) {
 }
 
 async function promptBoolean(rl, label, current, fallback) {
+    if (process.stdin.isTTY) {
+        const defaultValue = String(current || fallback || '').toLowerCase() === 'true';
+        const value = await promptSelect(label, [
+            { label: 'Yes', value: 'true' },
+            { label: 'No', value: 'false' }
+        ], defaultValue ? 0 : 1);
+        return value;
+    }
+
     const normalized = String(current || fallback || '').toLowerCase();
     const defaultValue = ['1', 'true', 'yes', 'on', 'y'].includes(normalized);
     const answer = (await rl.question(promptText(`${label} [${defaultValue ? 'Y/n' : 'y/N'}]: `))).trim().toLowerCase();
@@ -407,6 +416,63 @@ async function promptBoolean(rl, label, current, fallback) {
     if (!answer) return defaultValue ? 'true' : 'false';
 
     return ['1', 'true', 'yes', 'on', 'y'].includes(answer) ? 'true' : 'false';
+}
+
+function promptSelect(question, options, defaultIndex = 0) {
+    return new Promise((resolve) => {
+        if (!process.stdin.isTTY) {
+            resolve(options[defaultIndex].value);
+            return;
+        }
+
+        let selected = defaultIndex;
+        
+        process.stdout.write(promptText(`${question}\n`));
+        
+        const render = () => {
+            for (let i = 0; i < options.length; i++) {
+                const prefix = i === selected ? color('❯', colors.cyan) : ' ';
+                const itemColor = i === selected ? colors.cyan : colors.reset;
+                process.stdout.write(`${prefix} ${color(options[i].label, itemColor)}\n`);
+            }
+        };
+        
+        const cleanup = () => {
+            process.stdout.write(`\x1b[${options.length}A`);
+            for (let i = 0; i < options.length; i++) {
+                process.stdout.write('\x1b[2K\n');
+            }
+            process.stdout.write(`\x1b[${options.length}A`);
+        };
+        
+        render();
+        
+        const onKeypress = (str, key) => {
+            if (key.name === 'up') {
+                selected = Math.max(0, selected - 1);
+                cleanup();
+                render();
+            } else if (key.name === 'down') {
+                selected = Math.min(options.length - 1, selected + 1);
+                cleanup();
+                render();
+            } else if (key.name === 'return' || key.name === 'enter') {
+                process.stdin.removeListener('keypress', onKeypress);
+                process.stdin.setRawMode(false);
+                process.stdin.pause();
+                cleanup();
+                process.stdout.write(`\x1b[1A\x1b[2K${promptText(`${question} `)}${options[selected].label}\n`);
+                resolve(options[selected].value);
+            } else if (key.ctrl && key.name === 'c') {
+                process.exit(1);
+            }
+        };
+        
+        readline.emitKeypressEvents(process.stdin);
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+        process.stdin.on('keypress', onKeypress);
+    });
 }
 
 async function setupValue(rl, options) {
@@ -541,10 +607,36 @@ async function setup() {
             values.DEFAULT_WORKSPACE = await setupValue(rl, { label: 'Default workspace path', flag: 'workspace', current: existing.DEFAULT_WORKSPACE, headless });
             values.DEFAULT_MODEL = await setupValue(rl, { label: 'Model override', flag: 'model', current: existing.DEFAULT_MODEL, headless });
             values.DISCODE_MODEL_CHOICES = await setupValue(rl, { label: 'Extra model ids, comma separated', flag: 'models', current: existing.DISCODE_MODEL_CHOICES, headless });
-            values.DISCODE_PROVIDER = await setupValue(rl, { label: 'Active provider discode/codex/anthropic/zai/qwen/groq/opencode/custom', flag: 'provider', current: existing.DISCODE_PROVIDER, fallback: 'discode', headless });
-            values.DISCODE_PROVIDER_PRIORITY = await setupValue(rl, { label: 'Provider fallback order', flag: 'provider-priority', current: existing.DISCODE_PROVIDER_PRIORITY, fallback: 'discode,codex,anthropic,zai,qwen,groq,opencode,custom', headless });
-            values.DISCODE_PROVIDER_COMMAND = await setupValue(rl, { label: 'Custom provider command', flag: 'provider-command', current: existing.DISCODE_PROVIDER_COMMAND, headless });
-            values.DISCODE_PERMISSION_MODE = await setupValue(rl, { label: 'Permission mode full/directory/auto-review', flag: 'permission', current: existing.DISCODE_PERMISSION_MODE, fallback: 'full', headless });
+            const providerOptions = [
+                { label: 'Discode Native Harness (recommended)', value: 'discode' },
+                { label: 'OpenAI / Codex', value: 'codex' },
+                { label: 'Anthropic Claude', value: 'anthropic' },
+                { label: 'Groq', value: 'groq' },
+                { label: 'Z.ai', value: 'zai' },
+                { label: 'Qwen', value: 'qwen' },
+                { label: 'OpenCode Wrapper', value: 'opencode' },
+                { label: 'Custom / Rust API', value: 'custom' }
+            ];
+            
+            if (headless || !process.stdin.isTTY) {
+                values.DISCODE_PROVIDER = await setupValue(rl, { label: 'Active provider discode/codex/anthropic/zai/qwen/groq/opencode/custom', flag: 'provider', current: existing.DISCODE_PROVIDER, fallback: 'discode', headless });
+            } else {
+                const currentIdx = providerOptions.findIndex(o => o.value === (existing.DISCODE_PROVIDER || 'discode'));
+                values.DISCODE_PROVIDER = await promptSelect('Select active provider harness:', providerOptions, Math.max(0, currentIdx));
+            }
+            
+            const permissionOptions = [
+                { label: 'Full local automation (recommended)', value: 'full' },
+                { label: 'Directory access (prompts for host tools)', value: 'directory' },
+                { label: 'Auto-review (read-only mode)', value: 'auto-review' }
+            ];
+
+            if (headless || !process.stdin.isTTY) {
+                values.DISCODE_PERMISSION_MODE = await setupValue(rl, { label: 'Permission mode full/directory/auto-review', flag: 'permission', current: existing.DISCODE_PERMISSION_MODE, fallback: 'full', headless });
+            } else {
+                const currentIdx = permissionOptions.findIndex(o => o.value === (existing.DISCODE_PERMISSION_MODE || 'full'));
+                values.DISCODE_PERMISSION_MODE = await promptSelect('Select agent permission mode:', permissionOptions, Math.max(0, currentIdx));
+            }
             values.DISCODE_REMINDER_PINGS = await setupBoolean(rl, { label: 'Completion pings', flag: 'reminder-pings', current: existing.DISCODE_REMINDER_PINGS, fallback: 'true', headless });
             values.AUTO_SWITCH_ON_LIMIT = await setupBoolean(rl, { label: 'Auto-switch on usage limits', flag: 'auto-switch', current: existing.AUTO_SWITCH_ON_LIMIT, fallback: 'true', headless });
             values.CODEX_BIN = await setupValue(rl, { label: 'Codex binary', flag: 'codex-bin', current: existing.CODEX_BIN, fallback: 'codex', headless });
@@ -645,16 +737,30 @@ async function setupProviderAccounts(rl, headless, targetAccountsPath, values) {
     if (headless) return;
 
     setupScreen('Provider accounts', 'Optional — add API keys for AI providers, or skip and add them later from Discord.');
-    note('You can always add accounts later with the usage dashboard in Discord.');
+    note('Add AI provider credentials here so Discode can talk to the models.');
     console.log('');
-    const shouldAdd = !['n', 'no'].includes((await rl.question(promptText('Add provider API keys now? [Y/n]: '))).trim().toLowerCase());
+    const shouldAdd = await promptBoolean(rl, 'Add provider API keys now?', 'yes');
 
-    if (!shouldAdd) return;
-    console.log('');
-    note('Type a provider name to add it, or "done" to finish.');
+    if (shouldAdd === 'false') return;
 
     while (true) {
-        const provider = (await rl.question(promptText('Provider codex/anthropic/groq/zai/qwen/custom/opencode/done [done]: '))).trim().toLowerCase() || 'done';
+        console.log('');
+        let provider = 'done';
+        
+        if (headless || !process.stdin.isTTY) {
+            provider = (await rl.question(promptText('Provider codex/anthropic/groq/zai/qwen/custom/opencode/done [done]: '))).trim().toLowerCase() || 'done';
+        } else {
+            provider = await promptSelect('Select provider to configure:', [
+                { label: 'OpenAI / Codex', value: 'codex' },
+                { label: 'Anthropic', value: 'anthropic' },
+                { label: 'Groq', value: 'groq' },
+                { label: 'Z.ai', value: 'zai' },
+                { label: 'Qwen', value: 'qwen' },
+                { label: 'OpenCode Wrapper', value: 'opencode' },
+                { label: 'Custom API', value: 'custom' },
+                { label: color('Done (Finish setup)', colors.dim), value: 'done' }
+            ]);
+        }
 
         if (provider === 'done' || provider === 'skip' || provider === 'no') return;
         if (!['codex', 'anthropic', 'groq', 'zai', 'qwen', 'custom', 'opencode'].includes(provider)) {
@@ -677,7 +783,18 @@ async function setupProviderAccounts(rl, headless, targetAccountsPath, values) {
 }
 
 async function addCodexAccount(rl, targetAccountsPath, values) {
-    const mode = (await rl.question(promptText('Codex setup api-key/import/login/skip [api-key]: '))).trim().toLowerCase() || 'api-key';
+    let mode = 'api-key';
+    
+    if (process.stdin.isTTY) {
+        mode = await promptSelect('How do you want to configure Codex/OpenAI?', [
+            { label: 'Paste an API key (Recommended)', value: 'api-key' },
+            { label: 'Import existing local credentials', value: 'import' },
+            { label: 'Run the codex login command', value: 'login' },
+            { label: 'Skip', value: 'skip' }
+        ]);
+    } else {
+        mode = (await rl.question(promptText('Codex setup api-key/import/login/skip [api-key]: '))).trim().toLowerCase() || 'api-key';
+    }
 
     if (mode === 'skip') return;
     if (mode === 'import') {

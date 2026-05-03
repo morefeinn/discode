@@ -330,7 +330,11 @@ step "Running setup"
 info "Configure your Discord bot, tokens, and provider accounts."
 printf "\n"
 
-bun "$target/bin/discode.mjs" setup
+if [ -r /dev/tty ]; then
+    bun "$target/bin/discode.mjs" setup < /dev/tty
+else
+    bun "$target/bin/discode.mjs" setup
+fi
 
 printf "\n"
 printf "${BOLD}${GREEN}+-- Installation complete -------+${RESET}\n"
