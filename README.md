@@ -18,7 +18,7 @@ irm https://raw.githubusercontent.com/morefeinn/discode/main/install.ps1 | iex
 discode start --background
 ```
 
-The installer checks for Git and Bun, asks before installing missing dependencies, installs production dependencies, links the `discode` CLI, then runs Discode setup.
+The installer checks for Git and Bun, asks before installing missing dependencies, installs production dependencies, and links the `discode` CLI. The first `discode start` runs setup automatically when `.env` is missing.
 Existing installs are updated from the latest `main` before dependencies are installed.
 
 Manual install:

@@ -572,6 +572,15 @@ async function setup() {
     }
 }
 
+async function ensureConfiguredForStart() {
+    const env = getRuntimeEnv();
+    const allowedUsers = env.ALLOWED_USER_IDS || env.ALLOWED_USER_ID || '';
+
+    if (env.DISCORD_TOKEN?.trim() && env.DISCORD_CLIENT_ID?.trim() && allowedUsers.trim()) return;
+    warn('Discode is not configured yet. Running setup first.');
+    await setup();
+}
+
 async function maybeImportCredentials(rl, headless, targetAccountsPath = accountsPath) {
     const candidates = await discoverCredentialCandidates(rootDir, getRuntimeEnv());
 
@@ -952,6 +961,7 @@ try {
             await updateDiscode();
         }
     } else if (command === 'start') {
+        await ensureConfiguredForStart();
         if (args.includes('--background') || args.includes('-d')) {
             startBackground();
         } else {
@@ -962,6 +972,7 @@ try {
     } else if (command === 'restart') {
         banner('Restarting runner');
         stop();
+        await ensureConfiguredForStart();
         startBackground();
     } else if (command === 'status') {
         status();

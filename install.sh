@@ -90,11 +90,4 @@ cd "$target"
 bun install --production
 bun link
 
-if [ "${DISCODE_SETUP:-1}" != "0" ]; then
-    if [ -r /dev/tty ]; then
-        bun bin/discode.mjs setup < /dev/tty > /dev/tty 2>&1
-    else
-        echo "Interactive setup needs a terminal. Re-run this installer from a shell, or run: $target/bin/discode.mjs setup"
-        exit 1
-    fi
-fi
+echo "Discode installed. Run: discode start --background"
