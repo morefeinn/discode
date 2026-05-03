@@ -368,13 +368,14 @@ function writeEnvValues(values) {
 
 async function promptValue(rl, label, current, fallback, required) {
     const currentLabel = current ? ' [set]' : fallback ? ` [${fallback}]` : '';
+    const optionalTag = !required && !current && !fallback ? color(' (optional, Enter to skip)', colors.dim) : '';
 
     while (true) {
-        const answer = (await rl.question(promptText(`${label}${currentLabel}: `))).trim();
+        const answer = (await rl.question(promptText(`${label}${currentLabel}${optionalTag}: `))).trim();
         const value = answer || current || fallback || '';
 
         if (!required || value) return value;
-        console.log('Required.');
+        warn('This field is required.');
     }
 }
 
@@ -394,7 +395,7 @@ async function promptSecret(rl, label, current, required) {
 
             return next;
         }
-        console.log('Required.');
+        warn('This field is required.');
     }
 }
 
@@ -469,17 +470,33 @@ function createPrompter() {
 async function setup() {
     const existing = loadEnvFile();
     const headless = hasFlag('headless') || hasFlag('yes') || hasFlag('ci');
+    const isFirstRun = !existing.DISCORD_TOKEN;
     const rl = createPrompter();
 
     try {
-        setupScreen('Installer', 'Configure Discord access, provider routing, and local credentials');
+        setupScreen('Setup', isFirstRun ? 'First-time setup — three values needed to get started.' : 'Reconfigure Discode settings.');
         await checkDependencies(rl, headless);
-        setupScreen('Discord', 'Paste tokens normally. Secrets display as first and last 3 characters only.');
+
+        setupScreen('Discord bot credentials', 'Paste values from https://discord.com/developers/applications');
+        note('Secrets display as first and last 3 characters only.');
+        console.log('');
+
+        note(`${color('1/3', colors.bold)} Bot token — from Bot > Token > Copy`);
+        const discordToken = await setupSecret(rl, { label: 'Discord bot token', flag: 'token', current: existing.DISCORD_TOKEN, required: true, headless });
+
+        note(`${color('2/3', colors.bold)} Client ID — from General Information > Application ID`);
+        const discordClientId = await setupValue(rl, { label: 'Discord client (application) id', flag: 'client-id', current: existing.DISCORD_CLIENT_ID, required: true, headless });
+
+        note(`${color('3/3', colors.bold)} Your Discord user ID — right-click yourself > Copy User ID`);
+        note('Comma-separate multiple IDs to allow more users.');
+        const allowedUserIds = await setupValue(rl, { label: 'Allowed Discord user id(s)', flag: 'allowed-users', current: existing.ALLOWED_USER_IDS || existing.ALLOWED_USER_ID, required: true, headless });
+
         const values = {
-            DISCORD_TOKEN: await setupSecret(rl, { label: 'Discord bot token', flag: 'token', current: existing.DISCORD_TOKEN, required: true, headless }),
-            DISCORD_CLIENT_ID: await setupValue(rl, { label: 'Discord client id', flag: 'client-id', current: existing.DISCORD_CLIENT_ID, required: true, headless }),
-            ALLOWED_USER_IDS: await setupValue(rl, { label: 'Allowed Discord user ids, comma separated', flag: 'allowed-users', current: existing.ALLOWED_USER_IDS || existing.ALLOWED_USER_ID, required: true, headless })
+            DISCORD_TOKEN: discordToken,
+            DISCORD_CLIENT_ID: discordClientId,
+            ALLOWED_USER_IDS: allowedUserIds
         };
+
         values.PRIMARY_ALLOWED_USER_ID = await setupValue(rl, {
             label: 'Primary ping user id',
             flag: 'primary-user',
@@ -487,13 +504,6 @@ async function setup() {
             fallback: values.ALLOWED_USER_IDS.split(',')[0]?.trim() || '',
             headless
         });
-        const mode = headless
-            ? (hasFlag('technical') || hasFlag('runtime') ? 'technical' : 'simple')
-            : ((await rl.question(promptText('Setup mode simple/technical [simple]: '))).trim().toLowerCase() || 'simple');
-        const technical = mode === 'technical';
-        const configureRuntime = headless
-            ? hasFlag('runtime')
-            : technical || ['y', 'yes'].includes((await rl.question(promptText('Configure runtime options now? [y/N]: '))).trim().toLowerCase());
 
         values.DISCODE_COMMAND_NAME = flagValue('command-name') || existing.DISCODE_COMMAND_NAME || '';
         values.DISCODE_DATA_DIR = flagValue('data-dir') || existing.DISCODE_DATA_DIR || '';
@@ -519,16 +529,20 @@ async function setup() {
         values.DISCODE_EXTENSION_ROBLOX_UNIVERSE_ID = flagValue('roblox-universe-id') || existing.DISCODE_EXTENSION_ROBLOX_UNIVERSE_ID || '';
         values.DISCODE_EXTENSION_ROBLOX_PLACE_ID = flagValue('roblox-place-id') || existing.DISCODE_EXTENSION_ROBLOX_PLACE_ID || '';
 
+        const configureRuntime = headless
+            ? hasFlag('runtime')
+            : ['y', 'yes'].includes((await rl.question(promptText('Configure advanced runtime options? [y/N]: '))).trim().toLowerCase());
+
         if (configureRuntime) {
-            setupScreen('Harness runtime', 'Advanced runtime defaults');
+            setupScreen('Runtime options', 'All fields are optional — press Enter to keep defaults.');
             values.DISCODE_COMMAND_NAME = await setupValue(rl, { label: 'Slash command name override', flag: 'command-name', current: existing.DISCODE_COMMAND_NAME, headless });
-            values.DISCODE_DATA_DIR = await setupValue(rl, { label: 'Discode app data folder, blank uses ~/.discode', flag: 'data-dir', current: existing.DISCODE_DATA_DIR, headless });
-            values.DISCODE_WORKSPACES_DIR = await setupValue(rl, { label: 'Managed workspaces folder, blank uses app data', flag: 'workspaces-dir', current: existing.DISCODE_WORKSPACES_DIR, headless });
-            values.DEFAULT_WORKSPACE = await setupValue(rl, { label: 'Default workspace path, optional', flag: 'workspace', current: existing.DEFAULT_WORKSPACE, headless });
-            values.DEFAULT_MODEL = await setupValue(rl, { label: 'Model override, blank uses provider default', flag: 'model', current: existing.DEFAULT_MODEL, headless });
+            values.DISCODE_DATA_DIR = await setupValue(rl, { label: 'App data folder', flag: 'data-dir', current: existing.DISCODE_DATA_DIR, fallback: '~/.discode', headless });
+            values.DISCODE_WORKSPACES_DIR = await setupValue(rl, { label: 'Managed workspaces folder', flag: 'workspaces-dir', current: existing.DISCODE_WORKSPACES_DIR, headless });
+            values.DEFAULT_WORKSPACE = await setupValue(rl, { label: 'Default workspace path', flag: 'workspace', current: existing.DEFAULT_WORKSPACE, headless });
+            values.DEFAULT_MODEL = await setupValue(rl, { label: 'Model override', flag: 'model', current: existing.DEFAULT_MODEL, headless });
             values.DISCODE_MODEL_CHOICES = await setupValue(rl, { label: 'Extra model ids, comma separated', flag: 'models', current: existing.DISCODE_MODEL_CHOICES, headless });
             values.DISCODE_PROVIDER = await setupValue(rl, { label: 'Active provider discode/codex/anthropic/zai/qwen/groq/opencode/custom', flag: 'provider', current: existing.DISCODE_PROVIDER, fallback: 'discode', headless });
-            values.DISCODE_PROVIDER_PRIORITY = await setupValue(rl, { label: 'Load balancer provider order', flag: 'provider-priority', current: existing.DISCODE_PROVIDER_PRIORITY, fallback: 'discode,codex,anthropic,zai,qwen,groq,opencode,custom', headless });
+            values.DISCODE_PROVIDER_PRIORITY = await setupValue(rl, { label: 'Provider fallback order', flag: 'provider-priority', current: existing.DISCODE_PROVIDER_PRIORITY, fallback: 'discode,codex,anthropic,zai,qwen,groq,opencode,custom', headless });
             values.DISCODE_PROVIDER_COMMAND = await setupValue(rl, { label: 'Custom provider command', flag: 'provider-command', current: existing.DISCODE_PROVIDER_COMMAND, headless });
             values.DISCODE_PERMISSION_MODE = await setupValue(rl, { label: 'Permission mode full/directory/auto-review', flag: 'permission', current: existing.DISCODE_PERMISSION_MODE, fallback: 'full', headless });
             values.DISCODE_REMINDER_PINGS = await setupBoolean(rl, { label: 'Completion pings', flag: 'reminder-pings', current: existing.DISCODE_REMINDER_PINGS, fallback: 'true', headless });
@@ -541,11 +555,10 @@ async function setup() {
             values.DISCODE_ACCOUNTS_PATH = await setupValue(rl, { label: 'Accounts file path', flag: 'accounts-path', current: existing.DISCODE_ACCOUNTS_PATH, headless });
             values.CODEX_AUTH_PATH = await setupValue(rl, { label: 'Codex auth output path', flag: 'codex-auth-path', current: existing.CODEX_AUTH_PATH, headless });
         }
+
         const configureRoblox = headless
             ? hasFlag('roblox')
-            : technical
-                ? (await rl.question(promptText('Configure optional Roblox extension? [y/N]: '))).trim().toLowerCase()
-                : 'n';
+            : (await rl.question(promptText('Configure Roblox extension? [y/N]: '))).trim().toLowerCase();
 
         if (['y', 'yes'].includes(configureRoblox)) {
             values.DISCODE_EXTENSION_ROBLOX_API_KEY = await promptValue(rl, 'Roblox Open Cloud API key', existing.DISCODE_EXTENSION_ROBLOX_API_KEY, '', false);
@@ -559,13 +572,19 @@ async function setup() {
 
         await maybeImportCredentials(rl, headless, targetAccountsPath);
         await setupProviderAccounts(rl, headless, targetAccountsPath, values);
+
         clearScreen();
-        box(color('Ready', colors.green), [
+        box(color('Setup complete', colors.green), [
+            '',
             row('env', '.env written with mode 0600'),
             row('accounts', targetAccountsPath),
             row('harness', values.DISCODE_PROVIDER || 'discode'),
-            row('workspace', values.DEFAULT_WORKSPACE || 'set later in Discord'),
-            row('next', 'discode start')
+            row('workspace', values.DEFAULT_WORKSPACE || 'set later via /settings'),
+            '',
+            `  ${color('Next steps:', colors.bold)}`,
+            `    ${color('discode start --background', colors.cyan)}`,
+            `    ${color('discode status', colors.dim)}`,
+            ''
         ]);
     } finally {
         rl.close();
@@ -577,7 +596,10 @@ async function ensureConfiguredForStart() {
     const allowedUsers = env.ALLOWED_USER_IDS || env.ALLOWED_USER_ID || '';
 
     if (env.DISCORD_TOKEN?.trim() && env.DISCORD_CLIENT_ID?.trim() && allowedUsers.trim()) return;
-    warn('Discode is not configured yet. Running setup first.');
+    console.log('');
+    warn('Discode is not configured yet.');
+    note('Starting setup wizard...');
+    console.log('');
     await setup();
 }
 
@@ -622,10 +644,14 @@ async function importCredentials(candidates = null, targetAccountsPath = account
 async function setupProviderAccounts(rl, headless, targetAccountsPath, values) {
     if (headless) return;
 
-    setupScreen('Provider accounts', 'Add API keys now, or skip and use the Discord usage dashboard later.');
-    const shouldAdd = !['n', 'no'].includes((await rl.question(promptText('Add provider accounts now? [Y/n]: '))).trim().toLowerCase());
+    setupScreen('Provider accounts', 'Optional — add API keys for AI providers, or skip and add them later from Discord.');
+    note('You can always add accounts later with the usage dashboard in Discord.');
+    console.log('');
+    const shouldAdd = !['n', 'no'].includes((await rl.question(promptText('Add provider API keys now? [Y/n]: '))).trim().toLowerCase());
 
     if (!shouldAdd) return;
+    console.log('');
+    note('Type a provider name to add it, or "done" to finish.');
 
     while (true) {
         const provider = (await rl.question(promptText('Provider codex/anthropic/groq/zai/qwen/custom/opencode/done [done]: '))).trim().toLowerCase() || 'done';

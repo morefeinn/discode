@@ -4,24 +4,37 @@ Discode lets one or more approved Discord users drive local coding agents from D
 
 ## Install
 
-macOS/Linux:
+One command. Works on a fresh Mac, Linux box, or Windows PC — the installer handles everything.
+
+macOS / Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/morefeinn/discode/main/install.sh | sh
-discode start --background
 ```
 
 Windows PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/morefeinn/discode/main/install.ps1 | iex
+```
+
+The installer automatically:
+
+1. **Installs all dependencies** — Homebrew (macOS), Xcode CLT (macOS), Git, Bun, and curl if missing
+2. **Clones the repo** to `~/discode` (or updates an existing install)
+3. **Installs packages** and links the `discode` CLI
+4. **Adds `~/.bun/bin` to your PATH** so `discode` works immediately
+5. **Runs the onboarding wizard** — walks you through Discord token, client ID, allowed users, and provider accounts
+
+After the installer finishes, start the bot:
+
+```bash
 discode start --background
 ```
 
-The installer checks for Git and Bun, asks before installing missing dependencies, installs production dependencies, and links the `discode` CLI. The first `discode start` runs setup automatically when `.env` is missing.
-Existing installs are updated from the latest `main` before dependencies are installed.
+Set `DISCODE_YES=1` to skip confirmation prompts in CI or scripted environments.
 
-Manual install:
+Manual install (if you already have Git and Bun):
 
 ```bash
 git clone https://github.com/morefeinn/discode.git
