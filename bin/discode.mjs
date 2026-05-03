@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { clearLine, cursorTo } from 'node:readline';
+import { clearLine, createInterface, cursorTo } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import {
     checkForUpdate,
@@ -142,6 +142,13 @@ function maskSecret(value) {
     if (normalized.length <= 6) return '*'.repeat(normalized.length);
 
     return `${normalized.slice(0, 3)}...${normalized.slice(-3)}`;
+}
+
+function sanitizeSecret(value) {
+    return String(value || '')
+        .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+        .replace(/[\u0000-\u001f\u007f]/g, '')
+        .trim();
 }
 
 function rewritePromptLine(label, value) {
@@ -382,7 +389,7 @@ async function promptSecret(rl, label, current, required) {
 
     if (!process.stdin.isTTY || !process.stdin.setRawMode) {
         const answer = (await rl.question(promptText(`${label}${suffix}: `))).trim();
-        const value = answer || current || '';
+        const value = sanitizeSecret(answer) || current || '';
 
         if (answer) note(`${label}: ${maskSecret(value)}`);
         if (!required || value) return value;
@@ -393,64 +400,35 @@ async function promptSecret(rl, label, current, required) {
     const promptLabel = `${label}${suffix}: `;
 
     while (true) {
-        let value = '';
-
-        process.stdin.setRawMode(true);
-        process.stdin.resume();
-        process.stdin.setEncoding('utf8');
-        rewritePromptLine(promptLabel, value);
-
         const answer = await new Promise((resolve, reject) => {
-            const onData = chunk => {
-                const text = String(chunk);
+            const secretRl = createInterface({
+                input: process.stdin,
+                output: process.stdout,
+                terminal: true
+            });
+            const originalWrite = secretRl._writeToOutput;
+            const redraw = () => rewritePromptLine(promptLabel, sanitizeSecret(secretRl.line));
 
-                if (text === '\u0003') {
-                    cleanup();
-                    reject(new Error('Setup cancelled.'));
-                    return;
-                }
-                const newlineIndex = text.search(/[\r\n]/);
-
-                if (newlineIndex >= 0) {
-                    const beforeNewline = text.slice(0, newlineIndex);
-                    const printable = [...beforeNewline].filter(char => {
-                        const code = char.charCodeAt(0);
-
-                        return code >= 32 && code !== 127;
-                    }).join('');
-
-                    value += printable;
-                    rewritePromptLine(promptLabel, value);
-                    cleanup();
+            secretRl._writeToOutput = value => {
+                if (String(value).includes('\n')) {
                     process.stdout.write('\n');
-                    resolve(value);
                     return;
                 }
-                if (text === '\u007f' || text === '\b') {
-                    value = value.slice(0, -1);
-                    rewritePromptLine(promptLabel, value);
-                    return;
-                }
-                if (text === '\u001b') return;
-
-                const printable = [...text].filter(char => {
-                    const code = char.charCodeAt(0);
-
-                    return code >= 32 && code !== 127;
-                }).join('');
-
-                if (!printable) return;
-                value += printable;
-                rewritePromptLine(promptLabel, value);
+                redraw();
             };
-            const cleanup = () => {
-                process.stdin.off('data', onData);
-                process.stdin.setRawMode(false);
-            };
-
-            process.stdin.on('data', onData);
+            secretRl.on('SIGINT', () => {
+                secretRl.close();
+                reject(new Error('Setup cancelled.'));
+            });
+            secretRl.question(promptText(promptLabel), value => {
+                secretRl._writeToOutput = originalWrite;
+                secretRl.close();
+                process.stdout.write('\n');
+                resolve(value);
+            });
+            redraw();
         });
-        const normalized = String(answer).trim();
+        const normalized = sanitizeSecret(answer);
         const next = normalized || current || '';
 
         if (!required || next) return next;
