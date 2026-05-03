@@ -10,6 +10,7 @@ discode start --background
 ```
 
 The installer checks for Git and Bun, asks before installing missing dependencies, links the `discode` CLI, then runs Discode setup.
+Existing installs are updated from the latest `main` before dependencies are installed.
 
 Manual install:
 
@@ -29,28 +30,7 @@ The Discode installer writes a local `.env`. Required values are:
 
 `ALLOWED_USER_IDS` is comma-separated. `PRIMARY_ALLOWED_USER_ID` defaults to the first allowed user. You can later adjust allowed users and notification behavior from the bot's settings command.
 
-## Headless Install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/morefeinn/discode/main/install.sh \
-  | DISCODE_YES=1 DISCODE_SETUP_ARGS="--headless --token $DISCORD_TOKEN --client-id $DISCORD_CLIENT_ID --allowed-users $ALLOWED_USER_IDS" sh
-```
-
-Useful optional flags:
-
-- `--runtime`: enable runtime setup fields in headless mode
-- `--technical`: use the technical setup path
-- `--install-deps`: install missing checked dependencies in headless mode
-- `--import-credentials`: import credentials found in `.env`, Codex auth, or OpenCode auth during setup
-- `--workspace <path>`
-- `--data-dir <path>`
-- `--workspaces-dir <path>`
-- `--provider discode|codex|anthropic|zai|qwen|groq|opencode|custom`
-- `--provider-command <command>`
-- `--permission full|directory|auto-review`
-- `--models <comma-separated-extra-models>`
-- `--accounts-path <path>`
-- `--roblox`: enable Roblox extension fields
+During setup, pasted secrets stay visible only as a short mask such as `abc...xyz`. The setup flow can import existing Codex/OpenCode credentials and can add multiple Codex/OpenAI, Anthropic, Groq, Z.ai, Qwen, OpenCode, or custom accounts immediately.
 
 ## Commands
 

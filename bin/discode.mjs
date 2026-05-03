@@ -3,7 +3,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import readline from 'node:readline/promises';
+import { clearLine, cursorTo } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import {
     checkForUpdate,
@@ -18,10 +18,10 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const rootDir = path.resolve(path.dirname(__filename), '..');
-const dataDir = path.join(rootDir, 'data');
+const runtimeEnv = getRuntimeEnv();
+const dataDir = runtimeEnv.DISCODE_DATA_DIR || defaultDataDir();
 const pidPath = path.join(dataDir, 'discode.pid');
 const logPath = path.join(dataDir, 'discode.log');
-const runtimeEnv = getRuntimeEnv();
 const accountsPath = runtimeEnv.DISCODE_ACCOUNTS_PATH || path.join(dataDir, 'accounts.json');
 const packageJson = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
 
@@ -103,6 +103,41 @@ function promptText(value) {
     return color(`> ${value}`, colors.cyan);
 }
 
+function providerLabel(provider) {
+    if (provider === 'anthropic') return 'Anthropic';
+    if (provider === 'zai') return 'Z.ai';
+    if (provider === 'qwen') return 'Qwen';
+    if (provider === 'groq') return 'Groq';
+    if (provider === 'opencode') return 'OpenCode';
+    if (provider === 'custom') return 'Custom';
+
+    return 'Codex';
+}
+
+function defaultProviderEnvKey(provider) {
+    if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
+    if (provider === 'zai') return 'ZAI_API_KEY';
+    if (provider === 'qwen') return 'DASHSCOPE_API_KEY';
+    if (provider === 'groq') return 'GROQ_API_KEY';
+
+    return 'OPENAI_API_KEY';
+}
+
+function maskSecret(value) {
+    const normalized = String(value || '');
+
+    if (normalized.length === 0) return '';
+    if (normalized.length <= 6) return '*'.repeat(normalized.length);
+
+    return `${normalized.slice(0, 3)}...${normalized.slice(-3)}`;
+}
+
+function rewritePromptLine(label, value) {
+    cursorTo(process.stdout, 0);
+    process.stdout.write(`${promptText(label)}${maskSecret(value)}`);
+    clearLine(process.stdout, 1);
+}
+
 function hasFlag(name) {
     return args.includes(`--${name}`);
 }
@@ -174,6 +209,19 @@ function getRuntimeEnv() {
         ...loadEnvFile(),
         ...process.env
     };
+}
+
+function defaultDataDir() {
+    const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
+
+    return xdgDataHome ? path.join(xdgDataHome, 'discode') : path.join(process.env.HOME || rootDir, '.discode');
+}
+
+function setupAccountsPath(values) {
+    if (values.DISCODE_ACCOUNTS_PATH?.trim()) return values.DISCODE_ACCOUNTS_PATH.trim();
+    if (values.DISCODE_DATA_DIR?.trim()) return path.join(values.DISCODE_DATA_DIR.trim(), 'accounts.json');
+
+    return accountsPath;
 }
 
 function commandExists(name) {
@@ -286,6 +334,86 @@ async function promptValue(rl, label, current, fallback, required) {
     }
 }
 
+async function promptSecret(rl, label, current, required) {
+    const suffix = current ? ' [set]' : '';
+
+    if (!process.stdin.isTTY || !process.stdin.setRawMode) {
+        const answer = (await rl.question(promptText(`${label}${suffix}: `))).trim();
+        const value = answer || current || '';
+
+        if (answer) note(`${label}: ${maskSecret(value)}`);
+        if (!required || value) return value;
+        console.log('Required.');
+        return promptSecret(rl, label, current, required);
+    }
+
+    const promptLabel = `${label}${suffix}: `;
+
+    while (true) {
+        let value = '';
+
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+        process.stdin.setEncoding('utf8');
+        rewritePromptLine(promptLabel, value);
+
+        const answer = await new Promise((resolve, reject) => {
+            const onData = chunk => {
+                const text = String(chunk);
+
+                if (text === '\u0003') {
+                    cleanup();
+                    reject(new Error('Setup cancelled.'));
+                    return;
+                }
+                const newlineIndex = text.search(/[\r\n]/);
+
+                if (newlineIndex >= 0) {
+                    const beforeNewline = text.slice(0, newlineIndex);
+                    const printable = [...beforeNewline].filter(char => {
+                        const code = char.charCodeAt(0);
+
+                        return code >= 32 && code !== 127;
+                    }).join('');
+
+                    value += printable;
+                    cleanup();
+                    process.stdout.write('\n');
+                    resolve(value);
+                    return;
+                }
+                if (text === '\u007f' || text === '\b') {
+                    value = value.slice(0, -1);
+                    rewritePromptLine(promptLabel, value);
+                    return;
+                }
+                if (text === '\u001b') return;
+
+                const printable = [...text].filter(char => {
+                    const code = char.charCodeAt(0);
+
+                    return code >= 32 && code !== 127;
+                }).join('');
+
+                if (!printable) return;
+                value += printable;
+                rewritePromptLine(promptLabel, value);
+            };
+            const cleanup = () => {
+                process.stdin.off('data', onData);
+                process.stdin.setRawMode(false);
+            };
+
+            process.stdin.on('data', onData);
+        });
+        const normalized = String(answer).trim();
+        const next = normalized || current || '';
+
+        if (!required || next) return next;
+        console.log('Required.');
+    }
+}
+
 async function promptBoolean(rl, label, current, fallback) {
     const normalized = String(current || fallback || '').toLowerCase();
     const defaultValue = ['1', 'true', 'yes', 'on', 'y'].includes(normalized);
@@ -312,6 +440,19 @@ async function setupValue(rl, options) {
     return promptValue(rl, options.label, current, fallback, options.required);
 }
 
+async function setupSecret(rl, options) {
+    const cliValue = flagValue(options.flag);
+    const current = cliValue || options.current || '';
+
+    if (options.headless) {
+        if (options.required && !current) throw new Error(`${options.label} is required.`);
+
+        return current;
+    }
+
+    return promptSecret(rl, options.label, current, options.required);
+}
+
 async function setupBoolean(rl, options) {
     const cliValue = flagValue(options.flag);
 
@@ -324,7 +465,46 @@ async function setupBoolean(rl, options) {
 
 function createPrompter() {
     if (process.stdin.isTTY) {
-        return readline.createInterface({ input: process.stdin, output: process.stdout });
+        return {
+            async question(label) {
+                process.stdout.write(label);
+                process.stdin.setRawMode?.(false);
+                process.stdin.resume();
+                process.stdin.setEncoding('utf8');
+
+                return await new Promise((resolve, reject) => {
+                    let value = '';
+                    const onData = chunk => {
+                        const text = String(chunk);
+
+                        if (text.includes('\u0003')) {
+                            cleanup();
+                            reject(new Error('Setup cancelled.'));
+                            return;
+                        }
+
+                        const newlineIndex = text.search(/[\r\n]/);
+
+                        if (newlineIndex >= 0) {
+                            value += text.slice(0, newlineIndex);
+                            cleanup();
+                            resolve(value);
+                            return;
+                        }
+
+                        value += text;
+                    };
+                    const cleanup = () => {
+                        process.stdin.off('data', onData);
+                    };
+
+                    process.stdin.on('data', onData);
+                });
+            },
+            close() {
+                process.stdin.pause();
+            }
+        };
     }
     const answers = fs.readFileSync(0, 'utf8').split(/\r?\n/);
     let index = 0;
@@ -352,7 +532,7 @@ async function setup() {
         await checkDependencies(rl, headless);
         title('Discord');
         const values = {
-            DISCORD_TOKEN: await setupValue(rl, { label: 'Discord bot token', flag: 'token', current: existing.DISCORD_TOKEN, required: true, headless }),
+            DISCORD_TOKEN: await setupSecret(rl, { label: 'Discord bot token', flag: 'token', current: existing.DISCORD_TOKEN, required: true, headless }),
             DISCORD_CLIENT_ID: await setupValue(rl, { label: 'Discord client id', flag: 'client-id', current: existing.DISCORD_CLIENT_ID, required: true, headless }),
             ALLOWED_USER_IDS: await setupValue(rl, { label: 'Allowed Discord user ids, comma separated', flag: 'allowed-users', current: existing.ALLOWED_USER_IDS || existing.ALLOWED_USER_ID, required: true, headless })
         };
@@ -431,10 +611,14 @@ async function setup() {
 
         writeEnvValues(values);
         ensureDataDir();
-        await maybeImportCredentials(rl, headless);
+        const targetAccountsPath = setupAccountsPath(values);
+
+        await maybeImportCredentials(rl, headless, targetAccountsPath);
+        await setupProviderAccounts(rl, headless, targetAccountsPath, values);
         console.log('');
         box(color('Ready', colors.green), [
             row('env', '.env written with mode 0600'),
+            row('accounts', targetAccountsPath),
             row('harness', values.DISCODE_PROVIDER || 'discode'),
             row('workspace', values.DEFAULT_WORKSPACE || 'set later in Discord'),
             row('next', 'discode start')
@@ -444,7 +628,7 @@ async function setup() {
     }
 }
 
-async function maybeImportCredentials(rl, headless) {
+async function maybeImportCredentials(rl, headless, targetAccountsPath = accountsPath) {
     const candidates = await discoverCredentialCandidates(rootDir, getRuntimeEnv());
 
     if (candidates.length === 0) {
@@ -461,16 +645,16 @@ async function maybeImportCredentials(rl, headless) {
         : !['n', 'no'].includes((await rl.question(promptText('Copy these into Discode accounts now? [Y/n]: '))).trim().toLowerCase());
 
     if (!shouldImport) return;
-    await importCredentials(candidates);
+    await importCredentials(candidates, targetAccountsPath);
 }
 
-async function importCredentials(candidates = null) {
+async function importCredentials(candidates = null, targetAccountsPath = accountsPath) {
     const discovered = candidates || await discoverCredentialCandidates(rootDir, getRuntimeEnv());
     if (discovered.length === 0) {
         warn('No existing provider credentials were found.');
         return;
     }
-    const result = await importCredentialCandidates(accountsPath, discovered);
+    const result = await importCredentialCandidates(targetAccountsPath, discovered);
 
     if (result.imported.length === 0) {
         warn(`No new credentials imported. ${result.skipped.length} already configured.`);
@@ -480,6 +664,127 @@ async function importCredentials(candidates = null) {
     for (const account of result.imported.slice(0, 8)) {
         note(`${account.provider} ${account.name}`);
     }
+}
+
+async function setupProviderAccounts(rl, headless, targetAccountsPath, values) {
+    if (headless) return;
+
+    title('Provider accounts');
+    note('Add API keys now, or skip and use the Discord usage dashboard later.');
+    const shouldAdd = !['n', 'no'].includes((await rl.question(promptText('Add provider accounts now? [Y/n]: '))).trim().toLowerCase());
+
+    if (!shouldAdd) return;
+
+    while (true) {
+        const provider = (await rl.question(promptText('Provider codex/anthropic/groq/zai/qwen/custom/opencode/done [done]: '))).trim().toLowerCase() || 'done';
+
+        if (provider === 'done' || provider === 'skip' || provider === 'no') return;
+        if (!['codex', 'anthropic', 'groq', 'zai', 'qwen', 'custom', 'opencode'].includes(provider)) {
+            warn('Choose codex, anthropic, groq, zai, qwen, custom, opencode, or done.');
+            continue;
+        }
+
+        if (provider === 'opencode') {
+            await addOpenCodeAccount(rl, targetAccountsPath);
+            continue;
+        }
+
+        if (provider === 'codex') {
+            await addCodexAccount(rl, targetAccountsPath, values);
+            continue;
+        }
+
+        await addApiKeyAccount(rl, targetAccountsPath, provider);
+    }
+}
+
+async function addCodexAccount(rl, targetAccountsPath, values) {
+    const mode = (await rl.question(promptText('Codex setup api-key/import/login/skip [api-key]: '))).trim().toLowerCase() || 'api-key';
+
+    if (mode === 'skip') return;
+    if (mode === 'import') {
+        await importCredentials(await discoverCredentialCandidates(rootDir, getRuntimeEnv()), targetAccountsPath);
+        return;
+    }
+    if (mode === 'login') {
+        const bin = values.CODEX_BIN || 'codex';
+
+        if (!commandExists(bin)) {
+            warn(`${bin} was not found on PATH. Paste an OpenAI API key instead, or install Codex first.`);
+            return;
+        }
+        note(`Starting ${bin} login`);
+        const result = spawnSync(bin, ['login'], { stdio: 'inherit' });
+
+        if (result.status !== 0) {
+            warn(`${bin} login did not finish successfully.`);
+            return;
+        }
+        await importCredentials(await discoverCredentialCandidates(rootDir, getRuntimeEnv()), targetAccountsPath);
+        return;
+    }
+
+    await addApiKeyAccount(rl, targetAccountsPath, 'codex');
+}
+
+async function addOpenCodeAccount(rl, targetAccountsPath) {
+    const candidates = (await discoverCredentialCandidates(rootDir, getRuntimeEnv()))
+        .filter(candidate => candidate.source.toLowerCase().includes('opencode'));
+
+    if (candidates.length > 0) {
+        await importCredentials(candidates, targetAccountsPath);
+        return;
+    }
+
+    const shouldAddWrapper = !['n', 'no'].includes((await rl.question(promptText('No OpenCode auth file found. Add wrapper account anyway? [Y/n]: '))).trim().toLowerCase());
+
+    if (!shouldAddWrapper) return;
+    const name = await promptValue(rl, 'Account name', '', 'OpenCode local auth', false);
+
+    await saveManualAccount(targetAccountsPath, {
+        provider: 'opencode',
+        name,
+        auth_mode: 'wrapper',
+        auth_data: { source: 'setup' },
+        source: 'setup'
+    });
+}
+
+async function addApiKeyAccount(rl, targetAccountsPath, provider) {
+    const label = providerLabel(provider);
+    const defaultName = `${label} API key`;
+    const name = await promptValue(rl, 'Account name', '', defaultName, false);
+    const envKey = await promptValue(rl, 'Environment variable name', '', defaultProviderEnvKey(provider), false);
+    const apiKey = await promptSecret(rl, `${label} API key`, '', true);
+    const baseUrl = provider === 'custom'
+        ? await promptValue(rl, 'API base URL', '', '', true)
+        : '';
+    const model = await promptValue(rl, 'Default model, optional', '', '', false);
+
+    await saveManualAccount(targetAccountsPath, {
+        provider,
+        name,
+        auth_mode: 'api_key',
+        auth_data: {
+            api_key: apiKey,
+            env_key: envKey,
+            ...(baseUrl ? { base_url: baseUrl } : {})
+        },
+        model: model || undefined,
+        source: 'setup'
+    });
+}
+
+async function saveManualAccount(targetAccountsPath, account) {
+    const result = await importCredentialCandidates(targetAccountsPath, [account], true);
+
+    if (result.imported.length > 0) {
+        const saved = result.imported[0];
+        success(`Added ${providerLabel(saved.provider)} account ${saved.name}`);
+        return;
+    }
+
+    warn('That account is already configured.');
 }
 
 function startForeground() {
@@ -668,7 +973,6 @@ function help() {
     console.log(color('Commands', colors.bold));
     const commands = [
         ['setup', 'Run the installer'],
-        ['setup --headless', 'Write .env from flags or environment'],
         ['credentials import', 'Import local provider credentials'],
         ['update --check', 'Check for Discode updates'],
         ['update', 'Update from GitHub'],

@@ -58,7 +58,9 @@ if ! command -v bun >/dev/null 2>&1; then
 fi
 
 if [ -d "$target/.git" ]; then
-    git -C "$target" pull --ff-only
+    git -C "$target" fetch origin main
+    git -C "$target" checkout main
+    git -C "$target" pull --ff-only origin main
 else
     git clone "$repo" "$target"
 fi
@@ -68,9 +70,10 @@ bun install
 bun link
 
 if [ "${DISCODE_SETUP:-1}" != "0" ]; then
-    if [ -r /dev/tty ] && [ -z "${DISCODE_SETUP_ARGS:-}" ]; then
+    if [ -r /dev/tty ]; then
         bun bin/discode.mjs setup < /dev/tty
     else
-        bun bin/discode.mjs setup ${DISCODE_SETUP_ARGS:-}
+        echo "Interactive setup needs a terminal. Re-run this installer from a shell, or run: $target/bin/discode.mjs setup"
+        exit 1
     fi
 fi
