@@ -29,7 +29,7 @@ fail() {
 }
 
 step() {
-    printf "\n${BOLD}== %s${RESET}\n" "$1"
+    printf "\n${BOLD}-> %s${RESET}\n" "$1"
 }
 
 sudo_cmd() {
@@ -272,15 +272,22 @@ step "Pre-flight checks"
 
 os_name="$(uname -s)"
 arch="$(uname -m)"
-info "Detected: $os_name $arch"
+
+if [ "$os_name" = "Darwin" ]; then
+    if [ "$arch" = "arm64" ]; then
+        info "Detected: macOS (Apple Silicon)"
+    else
+        info "Detected: macOS (Intel)"
+    fi
+elif [ "$os_name" = "Linux" ]; then
+    info "Detected: Linux"
+else
+    info "Detected: $os_name"
+fi
 
 install_curl
 
 step "Installing dependencies"
-
-if [ "$os_name" = "Darwin" ]; then
-    info "macOS detected — checking Xcode CLT, Homebrew, Git, and Bun"
-fi
 
 install_git
 install_bun
@@ -291,12 +298,12 @@ step "Cloning Discode"
 
 if [ -d "$target/.git" ]; then
     info "Existing install found at $target — updating"
-    git -C "$target" fetch origin main
-    git -C "$target" checkout main 2>/dev/null || true
-    git -C "$target" pull --ff-only origin main
+    git -C "$target" fetch -q origin main
+    git -C "$target" checkout -q main 2>/dev/null || true
+    git -C "$target" pull -q --ff-only origin main
     ok "Updated to latest"
 else
-    git clone "$repo" "$target"
+    git clone -q "$repo" "$target"
     ok "Cloned to $target"
 fi
 
@@ -331,10 +338,9 @@ info "Configure your Discord bot, tokens, and provider accounts."
 printf "\n"
 
 if [ -r /dev/tty ]; then
-    bun "$target/bin/discode.mjs" setup < /dev/tty
-else
-    bun "$target/bin/discode.mjs" setup
+    exec < /dev/tty
 fi
+bun "$target/bin/discode.mjs" setup
 
 printf "\n"
 printf "${BOLD}${GREEN}+-- Installation complete -------+${RESET}\n"

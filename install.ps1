@@ -25,7 +25,7 @@ function Write-Fail($Message) {
 
 function Write-Step($Message) {
     Write-Host ""
-    Write-Host "== $Message" -ForegroundColor White
+    Write-Host "-> $Message" -ForegroundColor White
 }
 
 function Ensure-Command($Name, $InstallBlock, $HelpText) {
@@ -116,12 +116,12 @@ Write-Step "Cloning Discode"
 
 if (Test-Path (Join-Path $Target ".git")) {
     Write-Info "Existing install found at $Target - updating"
-    git -C $Target fetch origin main
-    git -C $Target checkout main 2>$null
-    git -C $Target pull --ff-only origin main
+    git -C $Target fetch -q origin main
+    git -C $Target checkout -q main 2>$null
+    git -C $Target pull -q --ff-only origin main
     Write-Ok "Updated to latest"
 } else {
-    git clone $Repo $Target
+    git clone -q $Repo $Target
     Write-Ok "Cloned to $Target"
 }
 
